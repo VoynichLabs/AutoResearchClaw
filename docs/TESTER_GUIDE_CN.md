@@ -529,11 +529,13 @@ docker build -t researchclaw/experiment:latest researchclaw/docker/
 #     docker:
 #       gpu_enabled: true
 #       memory_limit_mb: 8192
-#       network_policy: "full"
+#       network_policy: "setup_only"  # 推荐默认值
 
 # 3. 运行
 researchclaw run --config config.yaml --auto-approve
 ```
+
+Docker 模式采用三阶段执行：pip install（联网）→ setup.py（联网）→ 实验代码（断网）。镜像已预缓存常用数据集（CIFAR-10/100、MNIST、FashionMNIST、STL-10、SVHN），标准基准测试无需网络。
 
 ### Q7: 我之前已经测试过了，再次测试需要注意什么？
 

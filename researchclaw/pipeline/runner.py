@@ -297,10 +297,33 @@ def execute_pipeline(
                 results.extend(pivot_results)
                 break  # Exit current loop; recursive call handles the rest
             else:
-                logger.warning(
-                    "Max pivot attempts (%d) reached — forcing PROCEED",
-                    MAX_DECISION_PIVOTS,
+                # Quality gate: check if experiment results are actually usable
+                _quality_ok, _quality_msg = _check_experiment_quality(
+                    run_dir, pivot_count
                 )
+                if not _quality_ok:
+                    logger.warning(
+                        "Max pivot attempts (%d) reached — forcing PROCEED "
+                        "with quality warning: %s",
+                        MAX_DECISION_PIVOTS,
+                        _quality_msg,
+                    )
+                    print(
+                        f"[{run_id}] QUALITY WARNING: {_quality_msg}"
+                    )
+                    # Write quality warning to run directory
+                    _qw_path = run_dir / "quality_warning.txt"
+                    _qw_path.write_text(
+                        f"Max pivots ({MAX_DECISION_PIVOTS}) reached.\n"
+                        f"Quality gate failed: {_quality_msg}\n"
+                        f"Paper will be written but may have significant issues.\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    logger.warning(
+                        "Max pivot attempts (%d) reached — forcing PROCEED",
+                        MAX_DECISION_PIVOTS,
+                    )
                 print(
                     f"[{run_id}] Max pivot attempts reached — forcing PROCEED"
                 )
@@ -670,6 +693,73 @@ def _consecutive_empty_metrics(run_dir: Path, pivot_count: int) -> bool:
         except (json.JSONDecodeError, OSError, AttributeError):
             return False
     return True  # Both cycles had empty metrics
+
+
+def _check_experiment_quality(
+    run_dir: Path, pivot_count: int
+) -> tuple[bool, str]:
+    """Quality gate before forced PROCEED.
+
+    Returns (ok, message). ok=False means experiment results have critical
+    quality issues and the forced-PROCEED paper will likely be poor.
+    """
+    # Find most recent experiment summary
+    summary_path = run_dir / "stage-14" / "experiment_summary.json"
+    if not summary_path.exists():
+        for v in range(pivot_count, 0, -1):
+            alt = run_dir / f"stage-14_v{v}" / "experiment_summary.json"
+            if alt.exists():
+                summary_path = alt
+                break
+
+    if not summary_path.exists():
+        return False, "No experiment_summary.json found — no metrics produced"
+
+    try:
+        data = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False, "experiment_summary.json is malformed"
+
+    # Check 1: Are all metrics zero?
+    ms = data.get("metrics_summary", {})
+    if isinstance(ms, dict):
+        values = []
+        for k, v in ms.items():
+            if isinstance(v, (int, float)):
+                values.append(v)
+        if values and all(v == 0.0 for v in values):
+            return False, "All experiment metrics are zero — experiments likely failed"
+
+    # Check 2: Zero variance across conditions (R13-1)
+    # Look for ablation_warnings or condition comparison data
+    ablation_warnings = data.get("ablation_warnings", [])
+    conditions = data.get("conditions", data.get("condition_metrics", {}))
+    if isinstance(conditions, dict) and len(conditions) >= 2:
+        primary_values = []
+        for cond_name, cond_data in conditions.items():
+            if isinstance(cond_data, dict):
+                pm = cond_data.get("primary_metric", cond_data.get("primary_metric_mean"))
+                if isinstance(pm, (int, float)):
+                    primary_values.append(pm)
+        if len(primary_values) >= 2 and len(set(primary_values)) == 1:
+            return False, (
+                f"All {len(primary_values)} conditions have identical primary_metric "
+                f"({primary_values[0]}) — condition implementations are likely broken"
+            )
+
+    # Check 3: Too many ablation warnings
+    if isinstance(ablation_warnings, list) and len(ablation_warnings) >= 3:
+        return False, (
+            f"{len(ablation_warnings)} ablation warnings — most conditions "
+            f"produce identical results"
+        )
+
+    # Check 4: Analysis quality score (if available)
+    quality = data.get("analysis_quality", data.get("quality_score"))
+    if isinstance(quality, (int, float)) and quality < 3.0:
+        return False, f"Analysis quality score {quality}/10 — below minimum threshold"
+
+    return True, "Quality checks passed"
 
 
 def _read_pivot_count(run_dir: Path) -> int:

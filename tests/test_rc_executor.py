@@ -1865,10 +1865,13 @@ class TestComputeBudgetBlock:
             stage_dir, run_dir, cfg, adapters, llm=llm
         )
 
-        # The LLM should have received compute budget info
+        # The LLM should have received compute budget info in some call
+        # (may be first call in legacy mode, or second call with CodeAgent)
         assert len(llm.calls) >= 1
-        user_msg = llm.calls[0][-1]["content"]
-        assert "60" in user_msg or "Compute Budget" in user_msg
+        all_user_msgs = " ".join(
+            call[-1]["content"] for call in llm.calls if call
+        )
+        assert "60" in all_user_msgs or "Compute Budget" in all_user_msgs
 
 
 class TestPartialTimeoutStatus:

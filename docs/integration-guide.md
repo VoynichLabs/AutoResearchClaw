@@ -448,12 +448,24 @@ experiment:
     image: "researchclaw/experiment:latest"
     gpu_enabled: true
     memory_limit_mb: 8192
-    network_policy: "none"       # none | pip_only | full
+    network_policy: "setup_only"   # none | setup_only | pip_only | full
     auto_install_deps: true
     shm_size_mb: 2048
 ```
 
-The pipeline runs generated code inside a **Docker container** with optional GPU passthrough, dependency auto-installation, and network isolation.
+The pipeline runs generated code inside a **Docker container** with GPU passthrough, dependency auto-installation, and network isolation. Execution follows a **three-phase model** within a single container:
+
+1. **Phase 0 (pip install)**: Installs auto-detected dependencies from `requirements.txt` (network enabled)
+2. **Phase 1 (setup.py)**: Runs `setup.py` for dataset downloads and environment preparation (network enabled)
+3. **Phase 2 (experiment)**: Executes the experiment code (network disabled by default via iptables)
+
+**Network policies**:
+- `none` — No network at all (all phases offline). Requires all deps pre-installed in image.
+- `setup_only` (default) — Network during Phase 0+1, disabled before Phase 2 via iptables (`--cap-add=NET_ADMIN`).
+- `pip_only` — Network only during Phase 0 (pip install), disabled for Phase 1+2.
+- `full` — Network available throughout all phases.
+
+**Pre-cached datasets**: The Docker image includes CIFAR-10/100, MNIST, FashionMNIST, STL-10, and SVHN at `/opt/datasets`, mounted read-only as `/workspace/data`. No download needed for these standard benchmarks.
 
 **Best for**: Reproducible experiments with full dependency isolation. Supports GPU passthrough (NVIDIA) and configurable network policies.
 

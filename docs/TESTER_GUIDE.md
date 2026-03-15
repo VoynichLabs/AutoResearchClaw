@@ -521,11 +521,13 @@ docker build -t researchclaw/experiment:latest researchclaw/docker/
 #     docker:
 #       gpu_enabled: true
 #       memory_limit_mb: 8192
-#       network_policy: "full"
+#       network_policy: "setup_only"  # recommended default
 
 # 3. Run
 researchclaw run --config config.yaml --auto-approve
 ```
+
+Docker mode uses a three-phase execution model: pip install (network on) → setup.py (network on) → experiment (network off). The image includes pre-cached datasets (CIFAR-10/100, MNIST, FashionMNIST, STL-10, SVHN) so standard benchmarks work without network access.
 
 ### Q7: I tested before — what should I do for a re-test?
 

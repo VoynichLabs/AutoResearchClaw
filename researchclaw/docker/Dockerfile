@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc g++ cmake make gfortran \
         libopenblas-dev liblapack-dev \
         git curl ca-certificates \
+        iptables iproute2 \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
     && python3 -m pip install --upgrade pip setuptools wheel \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -23,6 +24,11 @@ RUN python3 -m pip install \
         numpy scipy scikit-learn pandas matplotlib seaborn \
         tqdm gymnasium networkx torchdiffeq PyYAML \
     && python3 -m pip install "gymnasium[mujoco]" mujoco
+
+# Extended ML ecosystem — vision, metrics, utilities
+RUN python3 -m pip install \
+        timm einops torchmetrics Pillow \
+        h5py tensorboard albumentations kornia
 
 # LLM / Transformer training stack
 RUN python3 -m pip install \
@@ -41,6 +47,8 @@ RUN mkdir -p /opt/datasets && \
     python3 -c "import torchvision; torchvision.datasets.CIFAR100(root='/opt/datasets', train=True, download=True); torchvision.datasets.CIFAR100(root='/opt/datasets', train=False, download=True)" && \
     python3 -c "import torchvision; torchvision.datasets.FashionMNIST(root='/opt/datasets', train=True, download=True); torchvision.datasets.FashionMNIST(root='/opt/datasets', train=False, download=True)" && \
     python3 -c "import torchvision; torchvision.datasets.MNIST(root='/opt/datasets', train=True, download=True); torchvision.datasets.MNIST(root='/opt/datasets', train=False, download=True)" && \
+    python3 -c "import torchvision; torchvision.datasets.STL10(root='/opt/datasets', split='train', download=True); torchvision.datasets.STL10(root='/opt/datasets', split='test', download=True)" && \
+    python3 -c "import torchvision; torchvision.datasets.SVHN(root='/opt/datasets', split='train', download=True); torchvision.datasets.SVHN(root='/opt/datasets', split='test', download=True)" && \
     chmod -R a+r /opt/datasets
 
 # Non-root user for security
@@ -48,7 +56,12 @@ RUN groupadd -r researcher && useradd -r -g researcher -m -s /bin/bash researche
 WORKDIR /workspace
 RUN chown researcher:researcher /workspace
 
+# Entrypoint script — three-phase execution (pip install → setup → experiment)
+COPY entrypoint.sh /usr/local/bin/rc-entrypoint.sh
+RUN chmod +x /usr/local/bin/rc-entrypoint.sh
+
 USER researcher
 
-# Default: run a Python script passed as argument
-ENTRYPOINT ["python3", "-u"]
+# Default: run entrypoint wrapper with main.py as the experiment script
+ENTRYPOINT ["/usr/local/bin/rc-entrypoint.sh"]
+CMD ["main.py"]

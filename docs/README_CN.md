@@ -13,7 +13,7 @@
 <p align="center">
   <a href="../LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+"></a>
-  <a href="#测试"><img src="https://img.shields.io/badge/Tests-1039%20passed-brightgreen?logo=pytest&logoColor=white" alt="1039 Tests Passed"></a>
+  <a href="#测试"><img src="https://img.shields.io/badge/Tests-1128%20passed-brightgreen?logo=pytest&logoColor=white" alt="1128 Tests Passed"></a>
   <a href="https://github.com/Jiaaqiliu/AutoResearchClaw"><img src="https://img.shields.io/badge/GitHub-AutoResearchClaw-181717?logo=github" alt="GitHub"></a>
   <a href="#openclaw-集成"><img src="https://img.shields.io/badge/OpenClaw-Compatible-ff4444?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZD0iTTEyIDJDNi40OCAyIDIgNi40OCAyIDEyczQuNDggMTAgMTAgMTAgMTAtNC40OCAxMC0xMFMxNy41MiAyIDEyIDJ6IiBmaWxsPSJ3aGl0ZSIvPjwvc3ZnPg==" alt="OpenClaw Compatible"></a>
 </p>
@@ -459,7 +459,7 @@ llm:
 
 # === 实验 ===
 experiment:
-  mode: "sandbox"                  # simulated | sandbox | ssh_remote
+  mode: "sandbox"                  # simulated | sandbox | docker | ssh_remote
   time_budget_sec: 600             # 每次运行最大执行时间（默认：600 秒）
   max_iterations: 10
   sandbox:
@@ -467,6 +467,12 @@ experiment:
     gpu_required: false
     allowed_imports: [math, random, json, csv, numpy, torch, sklearn]
     max_memory_mb: 4096
+  docker:
+    image: "researchclaw/experiment:latest"
+    network_policy: "setup_only"   # none | setup_only | pip_only | full
+    gpu_enabled: true
+    memory_limit_mb: 8192
+    auto_install_deps: true        # 自动检测 import → requirements.txt
 
 # === 导出 ===
 export:

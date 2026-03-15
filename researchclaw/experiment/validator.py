@@ -604,6 +604,73 @@ def check_class_quality(all_files: dict[str, str]) -> list[str]:
                     f"may be copy-paste variants with no real algorithmic difference"
                 )
 
+    # --- Check 5: Ablation subclasses must override with different logic ---
+    # Parse inheritance relationships and compare method ASTs
+    for fname_code, code in all_files.items():
+        if not fname_code.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+
+        # Build {class_name: ClassDef} map for this file
+        file_classes: dict[str, ast.ClassDef] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                file_classes[node.name] = node
+
+        for cls_name, cls_node in file_classes.items():
+            # Check if this class inherits from another class in the same file
+            for base in cls_node.bases:
+                base_name = None
+                if isinstance(base, ast.Name):
+                    base_name = base.id
+                elif isinstance(base, ast.Attribute):
+                    base_name = base.attr
+                if not base_name or base_name not in file_classes:
+                    continue
+
+                parent_node = file_classes[base_name]
+                # Get method bodies as AST dumps for comparison
+                child_methods = {
+                    m.name: ast.dump(m)
+                    for m in cls_node.body
+                    if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and not m.name.startswith("__")
+                }
+                parent_methods = {
+                    m.name: ast.dump(m)
+                    for m in parent_node.body
+                    if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and not m.name.startswith("__")
+                }
+
+                if not child_methods:
+                    # Already caught by Check 1 (empty class)
+                    continue
+
+                # Check if all overridden methods have identical AST to parent
+                identical_count = 0
+                override_count = 0
+                for method_name, method_dump in child_methods.items():
+                    if method_name in parent_methods:
+                        override_count += 1
+                        if method_dump == parent_methods[method_name]:
+                            identical_count += 1
+
+                if override_count > 0 and identical_count == override_count:
+                    warnings.append(
+                        f"[{fname_code}] Class '{cls_name}' inherits from "
+                        f"'{base_name}' and overrides {override_count} method(s), "
+                        f"but ALL overridden methods have identical AST to parent "
+                        f"— this is NOT a real ablation. Methods must differ."
+                    )
+                elif override_count == 0 and len(child_methods) > 0:
+                    # Has methods but none override parent — might be fine
+                    # (new methods that parent doesn't have)
+                    pass
+
     return warnings
 
 

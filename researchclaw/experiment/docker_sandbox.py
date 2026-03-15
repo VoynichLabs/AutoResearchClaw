@@ -1,4 +1,14 @@
-"""Docker-based sandbox for experiment code execution with GPU passthrough."""
+"""Docker-based sandbox for experiment code execution with GPU passthrough.
+
+Uses a single-container, three-phase execution model:
+  Phase 0: pip install from requirements.txt (if present)
+  Phase 1: Run setup.py for dataset downloads (if present)
+  Phase 2: Run the experiment script (main.py)
+
+All phases run in the same container, so pip-installed packages
+persist into the experiment phase. Network can be disabled after
+setup via iptables (``setup_only`` policy).
+"""
 
 from __future__ import annotations
 
@@ -8,7 +18,6 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -26,11 +35,68 @@ def _next_container_name() -> str:
     return f"rc-exp-{_CONTAINER_COUNTER}-{os.getpid()}"
 
 
+# Packages already in the Docker image — skip during auto-detect.
+_BUILTIN_PACKAGES = {
+    # PyTorch ecosystem
+    "torch", "torchvision", "torchaudio", "torchdiffeq",
+    # Scientific / ML
+    "numpy", "scipy", "sklearn", "pandas", "matplotlib", "seaborn",
+    "tqdm", "gymnasium", "networkx",
+    # Extended ML ecosystem
+    "timm", "einops", "torchmetrics", "albumentations", "kornia",
+    "h5py", "tensorboard",
+    # HuggingFace / LLM stack
+    "transformers", "datasets", "accelerate", "peft", "trl",
+    "bitsandbytes", "sentencepiece", "protobuf", "tokenizers",
+    "safetensors", "evaluate",
+    # Other pre-installed
+    "yaml", "PIL", "mujoco",
+    # Python stdlib
+    "os", "sys", "math", "random", "json", "csv", "re", "time",
+    "collections", "itertools", "functools", "pathlib", "typing",
+    "dataclasses", "abc", "copy", "io", "logging", "argparse",
+    "datetime", "hashlib", "pickle", "subprocess", "shutil",
+    "tempfile", "warnings", "unittest", "contextlib", "operator",
+    "string", "textwrap", "struct", "statistics", "glob",
+    "urllib", "http", "email", "html", "xml",
+}
+
+# Map import names to pip package names.
+_IMPORT_TO_PIP = {
+    "torchdiffeq": "torchdiffeq",
+    "torch_geometric": "torch-geometric",
+    "torchvision": "torchvision",
+    "torchaudio": "torchaudio",
+    "cv2": "opencv-python",
+    "PIL": "Pillow",
+    "sklearn": "scikit-learn",
+    "yaml": "PyYAML",
+    "gym": "gymnasium",
+    "ogb": "ogb",
+    "dgl": "dgl",
+    "lightning": "lightning",
+    "pytorch_lightning": "pytorch-lightning",
+    "wandb": "wandb",
+    "optuna": "optuna",
+}
+
+
 class DockerSandbox:
     """Execute experiment code inside a Docker container.
 
     Same public API as :class:`ExperimentSandbox` so the pipeline can use
     either backend transparently.
+
+    The container uses ``entrypoint.sh`` which runs three phases in sequence:
+      0. ``pip install -r requirements.txt`` (if file present in /workspace)
+      1. ``python3 setup.py`` (if file present in /workspace)
+      2. ``python3 <entry_point>``
+
+    Network policy controls when network is available:
+      - ``"none"``:       No network at any point (``--network none``)
+      - ``"setup_only"``: Network during Phase 0+1, disabled via iptables before Phase 2
+      - ``"pip_only"``:   Network during Phase 0 only (legacy compat, same as setup_only)
+      - ``"full"``:       Network available throughout all phases
     """
 
     def __init__(self, config: DockerSandboxConfig, workdir: Path) -> None:
@@ -162,22 +228,19 @@ class DockerSandbox:
     def _execute(
         self, staging_dir: Path, *, entry_point: str, timeout_sec: int
     ) -> SandboxResult:
-        """Core execution: build docker command, run, collect results."""
+        """Core execution: single container, three-phase via entrypoint.sh."""
         cfg = self.config
         container_name = _next_container_name()
 
-        # Phase 1: install pip dependencies (if pip_only network)
-        if cfg.network_policy == "pip_only" and (
-            cfg.pip_pre_install or cfg.auto_install_deps
-        ):
-            self._install_deps(staging_dir, container_name + "-deps")
+        # Auto-generate requirements.txt if packages need installing
+        if cfg.network_policy in ("pip_only", "setup_only", "full"):
+            self._write_requirements_txt(staging_dir)
 
-        # Phase 2: run the experiment
+        # Build the docker run command
         cmd = self._build_run_command(
             staging_dir,
             entry_point=entry_point,
             container_name=container_name,
-            network_disabled=(cfg.network_policy != "full"),
         )
 
         start = time.monotonic()
@@ -256,25 +319,75 @@ class DockerSandbox:
         *,
         entry_point: str,
         container_name: str,
-        network_disabled: bool,
     ) -> list[str]:
-        """Build the ``docker run`` command list."""
+        """Build the ``docker run`` command list.
+
+        The container uses ``entrypoint.sh`` which handles:
+          Phase 0: pip install requirements.txt
+          Phase 1: python3 setup.py
+          Phase 2: python3 <entry_point>
+
+        Network policy determines --network and RC_SETUP_ONLY_NETWORK env.
+        """
         cfg = self.config
         cmd = [
             "docker", "run",
             "--name", container_name,
             "--rm",
-            "--user", f"{os.getuid()}:{os.getgid()}",
             "-v", f"{staging_dir}:/workspace",
             "-w", "/workspace",
             f"--memory={cfg.memory_limit_mb}m",
             f"--shm-size={cfg.shm_size_mb}m",
         ]
 
-        # Mount pre-cached datasets (read-only)
+        # --- Network policy ---
+        if cfg.network_policy == "none":
+            # Fully isolated — no network at any point
+            cmd.extend(["--network", "none"])
+            cmd.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
+        elif cfg.network_policy in ("setup_only", "pip_only"):
+            # Network during Phase 0+1, disabled via iptables before Phase 2.
+            # Run as root so entrypoint.sh can do pip install + iptables.
+            # The experiment script itself runs under exec (still root but
+            # the code is already validated by the pipeline security check).
+            cmd.extend(["-e", "RC_SETUP_ONLY_NETWORK=1"])
+            cmd.extend(["--cap-add=NET_ADMIN"])
+        elif cfg.network_policy == "full":
+            # Full network throughout — for development/debugging
+            cmd.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
+
+        # Mount pre-cached datasets
+        # Priority: /opt/datasets (system) > ~/.cache/datasets (user)
         datasets_host = Path("/opt/datasets")
+        user_datasets = Path.home() / ".cache" / "datasets"
         if datasets_host.is_dir():
-            cmd.extend(["-v", "/opt/datasets:/workspace/data:ro"])
+            cmd.extend(["-v", f"{datasets_host}:/workspace/data:ro"])
+        elif user_datasets.is_dir():
+            cmd.extend(["-v", f"{user_datasets}:/workspace/data:rw"])
+        else:
+            # Create user-level cache so containers can download datasets
+            user_datasets.mkdir(parents=True, exist_ok=True)
+            cmd.extend(["-v", f"{user_datasets}:/workspace/data:rw"])
+
+        # Mount HuggingFace model cache (read-write for downloading)
+        hf_mounted = False
+        hf_home_env = os.environ.get("HF_HOME", "").strip()
+        if hf_home_env:
+            xdg_hf = Path(hf_home_env).resolve()
+            if xdg_hf.is_dir():
+                cmd.extend(["-v", f"{xdg_hf}:/home/researcher/.cache/huggingface"])
+                cmd.extend(["-e", "HF_HOME=/home/researcher/.cache/huggingface"])
+                hf_mounted = True
+        if not hf_mounted:
+            hf_cache_host = Path.home() / ".cache" / "huggingface"
+            if hf_cache_host.is_dir():
+                cmd.extend(["-v", f"{hf_cache_host}:/home/researcher/.cache/huggingface"])
+                cmd.extend(["-e", "HF_HOME=/home/researcher/.cache/huggingface"])
+
+        # Pass HF token if available (for gated model downloads)
+        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        if hf_token:
+            cmd.extend(["-e", f"HF_TOKEN={hf_token}"])
 
         # Mount HuggingFace model cache (read-write for downloading)
         hf_mounted = False
@@ -304,95 +417,76 @@ class DockerSandbox:
             else:
                 cmd.extend(["--gpus", "all"])
 
-        # Network isolation
-        if network_disabled:
-            cmd.extend(["--network", "none"])
-
-        # Image and entry point script (ENTRYPOINT is "python3 -u")
+        # Image + entry point (passed as CMD arg to entrypoint.sh)
         cmd.append(cfg.image)
-        cmd.append(f"/workspace/{entry_point}")
+        cmd.append(entry_point)
 
         return cmd
 
-    def _install_deps(self, staging_dir: Path, container_name: str) -> None:
-        """Phase 1: install pip dependencies with network access."""
-        cfg = self.config
+    def _write_requirements_txt(self, staging_dir: Path) -> None:
+        """Generate requirements.txt in staging dir from auto-detected imports
+        and explicit pip_pre_install, unless one already exists (LLM-generated).
+        """
+        req_path = staging_dir / "requirements.txt"
 
-        # Collect packages to install
-        packages: list[str] = list(cfg.pip_pre_install)
+        # If the LLM already generated a requirements.txt, respect it but
+        # append any pip_pre_install packages not already listed.
+        existing_reqs: set[str] = set()
+        if req_path.exists():
+            for line in req_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    # Extract package name (before any version specifier)
+                    pkg = re.split(r"[><=!~\[]", line)[0].strip().lower()
+                    existing_reqs.add(pkg)
 
-        # Auto-detect imports from Python files
-        if cfg.auto_install_deps:
+        # Collect additional packages to install
+        packages: list[str] = []
+
+        # From config pip_pre_install
+        for pkg in self.config.pip_pre_install:
+            pkg_base = re.split(r"[><=!~\[]", pkg)[0].strip().lower()
+            if pkg_base not in existing_reqs:
+                packages.append(pkg)
+                existing_reqs.add(pkg_base)
+
+        # Auto-detect from imports
+        if self.config.auto_install_deps:
             detected = self._detect_pip_packages(staging_dir)
-            packages.extend(p for p in detected if p not in packages)
+            for pkg in detected:
+                pkg_base = pkg.lower()
+                if pkg_base not in existing_reqs:
+                    packages.append(pkg)
+                    existing_reqs.add(pkg_base)
 
-        if not packages:
-            return
+        if not packages and not req_path.exists():
+            return  # Nothing to install
 
-        pip_cmd = f"pip install --no-cache-dir --break-system-packages {' '.join(packages)}"
-        cmd = [
-            "docker", "run",
-            "--name", container_name,
-            "--rm",
-            "-v", f"{staging_dir}:/workspace",
-            "-w", "/workspace",
-            f"--memory={cfg.memory_limit_mb}m",
-        ]
-        # GPU not needed for pip install; override ENTRYPOINT for shell command
-        # Run as root for pip install, not host UID
-        cmd.extend(["--entrypoint", "bash", cfg.image, "-c", pip_cmd])
-
-        logger.info("Docker pip install: %s", packages)
-        try:
-            cp = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120, check=False
-            )
-            if cp.returncode != 0:
-                logger.warning("pip install failed: %s", cp.stderr[:500])
-        except subprocess.TimeoutExpired:
-            logger.warning("pip install timed out")
-            self._kill_container(container_name)
+        if packages:
+            mode = "a" if req_path.exists() else "w"
+            with open(req_path, mode, encoding="utf-8") as f:
+                if mode == "a":
+                    f.write("\n# Auto-detected by ResearchClaw\n")
+                for pkg in packages:
+                    f.write(pkg + "\n")
+            logger.info("requirements.txt updated: %s", packages)
 
     @staticmethod
     def _detect_pip_packages(staging_dir: Path) -> list[str]:
         """Scan Python files for import statements and return pip package names."""
-        # Map common import names to pip package names
-        import_to_pip = {
-            "torchdiffeq": "torchdiffeq",
-            "torch_geometric": "torch-geometric",
-            "torchvision": "torchvision",
-            "torchaudio": "torchaudio",
-            "cv2": "opencv-python",
-            "PIL": "Pillow",
-            "sklearn": "scikit-learn",
-            "yaml": "PyYAML",
-            "gym": "gymnasium",
-        }
-        # Packages already in the Docker image — skip these
-        builtin = {
-            "torch", "numpy", "scipy", "sklearn", "pandas", "matplotlib",
-            "seaborn", "tqdm", "gymnasium", "networkx", "torchdiffeq",
-            "torchvision", "torchaudio", "yaml",
-            # stdlib
-            "os", "sys", "math", "random", "json", "csv", "re", "time",
-            "collections", "itertools", "functools", "pathlib", "typing",
-            "dataclasses", "abc", "copy", "io", "logging", "argparse",
-            "datetime", "hashlib", "pickle", "subprocess", "shutil",
-            "tempfile", "warnings", "unittest", "contextlib", "operator",
-            "string", "textwrap", "struct", "statistics",
-        }
-
         import_re = re.compile(
             r"^\s*(?:import|from)\s+([\w.]+)", re.MULTILINE
         )
         detected: list[str] = []
         for pyf in staging_dir.glob("*.py"):
+            if pyf.name == "setup.py":
+                continue  # Don't scan setup.py for experiment deps
             text = pyf.read_text(encoding="utf-8", errors="replace")
             for m in import_re.finditer(text):
                 top_module = m.group(1).split(".")[0]
-                if top_module in builtin:
+                if top_module in _BUILTIN_PACKAGES:
                     continue
-                pip_name = import_to_pip.get(top_module, top_module)
+                pip_name = _IMPORT_TO_PIP.get(top_module, top_module)
                 if pip_name not in detected:
                     detected.append(pip_name)
 

@@ -428,19 +428,23 @@ _TITLE_SKIP = {
 
 def _extract_title(sections: list[_Section], raw_md: str) -> str:
     """Extract paper title from sections or raw markdown."""
-    # Look for an explicit "# Title" section whose body is the actual title
+    # Look for an explicit "# Title" or "## Title" section whose body is the
+    # actual title, or whose heading is "## Title Actual Paper Title".
     for sec in sections:
-        if sec.level == 1 and sec.heading_lower == "title":
+        if sec.level in (1, 2) and sec.heading_lower == "title":
             # The body often starts with **Bold Title** on the first line
             first_line = sec.body.split("\n")[0].strip()
             # Strip bold markers
             first_line = re.sub(r"\*\*(.+?)\*\*", r"\1", first_line)
             if first_line:
                 return first_line
+        # Handle "## Title Actual Paper Title" pattern (title embedded in heading)
+        if sec.level in (1, 2) and sec.heading_lower.startswith("title ") and len(sec.heading) > 6:
+            return sec.heading[6:].strip()
 
-    # Fallback: first H1 heading that isn't a meta-heading
+    # Fallback: first H1 or H2 heading that isn't a meta-heading
     for sec in sections:
-        if sec.level == 1 and sec.heading and sec.heading_lower not in _TITLE_SKIP:
+        if sec.level in (1, 2) and sec.heading and sec.heading_lower not in _TITLE_SKIP:
             return sec.heading
 
     # Last resort: first non-empty line

@@ -239,9 +239,16 @@ def _extract_paper_title(md_text: str) -> str:
 
     for line in search_region.splitlines():
         line = line.strip()
-        if line.startswith("# "):
-            heading = line.lstrip("# ").strip()
-            if heading.lower() in _SKIP:
+        # Match H1 or H2 headings
+        hm = _re.match(r"^(#{1,2})\s+(.+)$", line)
+        if hm:
+            heading = hm.group(2).strip()
+            heading_lower = heading.lower()
+            # Handle "## Title Actual Paper Title" pattern
+            if heading_lower.startswith("title ") and len(heading) > 6:
+                heading = heading[6:].strip()
+                heading_lower = heading.lower()
+            if heading_lower in _SKIP:
                 continue
             candidates.append(heading)
         # Bold title line (e.g. **My Paper Title**)
@@ -1945,6 +1952,25 @@ def _execute_experiment_design(
             _dg_block = _pm.block("dataset_guidance")
         except (KeyError, Exception):  # noqa: BLE001
             _dg_block = ""
+        # I-08: Inject RL step guidance for RL topics
+        _rl_kws = ("reinforcement learning", "ppo", "sac", "td3", "ddpg",
+                    "dqn", "mujoco", "continuous control", "actor-critic",
+                    "policy gradient", "exploration bonus")
+        if any(kw in config.research.topic.lower() for kw in _rl_kws):
+            try:
+                _dg_block += _pm.block("rl_step_guidance")
+            except Exception:  # noqa: BLE001
+                pass
+        # F-01: Inject framework docs for experiment design
+        try:
+            from researchclaw.data import detect_frameworks, load_framework_docs
+            _fw_ids = detect_frameworks(config.research.topic, hypotheses)
+            if _fw_ids:
+                _fw_docs = load_framework_docs(_fw_ids, max_chars=4000)
+                if _fw_docs:
+                    _dg_block += _fw_docs
+        except Exception:  # noqa: BLE001
+            pass
         sp = _pm.for_stage(
             "experiment_design",
             preamble=preamble,
@@ -2023,6 +2049,83 @@ def _execute_experiment_design(
             "risks": ["overfitting", "data leakage"],
             "compute_budget": {"max_gpu": 1, "max_hours": 4},
         }
+    # ── BA: BenchmarkAgent — intelligent dataset/baseline selection ──────
+    _benchmark_plan = None
+    if (
+        config.experiment.benchmark_agent.enabled
+        and config.experiment.mode in ("sandbox", "docker")
+        and llm is not None
+    ):
+        try:
+            from researchclaw.agents.benchmark_agent import BenchmarkOrchestrator
+            from researchclaw.agents.benchmark_agent.orchestrator import (
+                BenchmarkAgentConfig as _BACfg,
+            )
+
+            _ba_cfg_raw = config.experiment.benchmark_agent
+            _ba_cfg = _BACfg(
+                enabled=_ba_cfg_raw.enabled,
+                enable_hf_search=_ba_cfg_raw.enable_hf_search,
+                max_hf_results=_ba_cfg_raw.max_hf_results,
+                tier_limit=_ba_cfg_raw.tier_limit,
+                min_benchmarks=_ba_cfg_raw.min_benchmarks,
+                min_baselines=_ba_cfg_raw.min_baselines,
+                prefer_cached=_ba_cfg_raw.prefer_cached,
+                max_iterations=_ba_cfg_raw.max_iterations,
+            )
+
+            _hw = _load_hardware_profile(run_dir)
+            _ba = BenchmarkOrchestrator(
+                llm,
+                config=_ba_cfg,
+                gpu_memory_mb=(
+                    _hw.get("gpu_memory_mb", 49000) if _hw else 49000
+                ),
+                time_budget_sec=config.experiment.time_budget_sec,
+                network_policy=(
+                    config.experiment.docker.network_policy
+                    if config.experiment.mode == "docker"
+                    else "full"
+                ),
+                stage_dir=stage_dir / "benchmark_agent",
+            )
+            _benchmark_plan = _ba.orchestrate({
+                "topic": config.research.topic,
+                "hypothesis": hypotheses,
+                "experiment_plan": plan.get("objectives", "") if isinstance(plan, dict) else "",
+            })
+
+            # Inject BenchmarkAgent selections into experiment plan
+            if isinstance(plan, dict) and _benchmark_plan.selected_benchmarks:
+                plan["datasets"] = [
+                    b["name"] for b in _benchmark_plan.selected_benchmarks
+                ]
+                plan["baselines"] = [
+                    bl["name"] for bl in _benchmark_plan.selected_baselines
+                ] + plan.get("baselines", [])
+                # Deduplicate baselines
+                plan["baselines"] = list(dict.fromkeys(plan["baselines"]))
+
+            logger.info(
+                "BenchmarkAgent: %d benchmarks, %d baselines selected (%d LLM calls, %.1fs)",
+                len(_benchmark_plan.selected_benchmarks),
+                len(_benchmark_plan.selected_baselines),
+                _benchmark_plan.total_llm_calls,
+                _benchmark_plan.elapsed_sec,
+            )
+        except Exception as _ba_exc:
+            logger.warning("BenchmarkAgent failed (non-fatal): %s", _ba_exc)
+
+    # Save benchmark plan for code_generation stage
+    if _benchmark_plan is not None:
+        try:
+            (stage_dir / "benchmark_plan.json").write_text(
+                json.dumps(_benchmark_plan.to_dict(), indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     plan.setdefault("topic", config.research.topic)
     (stage_dir / "exp_plan.yaml").write_text(
         yaml.dump(plan, default_flow_style=False, allow_unicode=True),
@@ -2059,7 +2162,13 @@ def _execute_code_generation(
     if config.experiment.mode in ("sandbox", "docker"):
         if config.experiment.mode == "docker":
             pkg_prefix = "docker mode"
-            pkg_extras = ", torchdiffeq, gymnasium, networkx, and pip-installable packages"
+            pkg_extras = (
+                ", torchvision, torchaudio, matplotlib, seaborn, scipy, "
+                "tqdm, torchdiffeq, gymnasium, networkx, PyYAML, Pillow, "
+                "transformers, datasets, accelerate, peft, bitsandbytes, "
+                "timm, einops, torchmetrics, h5py, "
+                "and additional pip-installable packages (auto-detected from imports)"
+            )
         else:
             pkg_prefix = "sandbox mode"
             pkg_extras = ""
@@ -2104,17 +2213,63 @@ def _execute_code_generation(
             f"- Implement a time guard: stop gracefully at 80% of budget\n"
         )
 
-    # --- Dataset guidance + HP reporting (docker/sandbox modes) ---
+    # --- Dataset guidance + setup script + HP reporting (docker/sandbox modes) ---
     extra_guidance = ""
     if config.experiment.mode in ("sandbox", "docker"):
         try:
             extra_guidance += _pm.block("dataset_guidance")
         except Exception:  # noqa: BLE001
             pass
+        if config.experiment.mode == "docker":
+            try:
+                extra_guidance += _pm.block("setup_script_guidance")
+            except Exception:  # noqa: BLE001
+                pass
         try:
             extra_guidance += _pm.block("hp_reporting")
         except Exception:  # noqa: BLE001
             pass
+        # I-06: Multi-seed enforcement for all experiments
+        try:
+            extra_guidance += _pm.block("multi_seed_enforcement")
+        except Exception:  # noqa: BLE001
+            pass
+
+    # --- BA: Inject BenchmarkAgent plan from Stage 9 ---
+    _bp_path = None
+    for _s9_dir in sorted(run_dir.glob("stage-09*"), reverse=True):
+        _candidate = _s9_dir / "benchmark_plan.json"
+        if _candidate.exists():
+            _bp_path = _candidate
+            break
+    if _bp_path is not None:
+        try:
+            import json as _json_bp
+            _bp_data = _json_bp.loads(_bp_path.read_text(encoding="utf-8"))
+            # Reconstruct the prompt block
+            from researchclaw.agents.benchmark_agent.orchestrator import BenchmarkPlan
+            _bp = BenchmarkPlan(
+                selected_benchmarks=_bp_data.get("selected_benchmarks", []),
+                selected_baselines=_bp_data.get("selected_baselines", []),
+                data_loader_code=_bp_data.get("data_loader_code", ""),
+                baseline_code=_bp_data.get("baseline_code", ""),
+                experiment_notes=_bp_data.get("experiment_notes", ""),
+            )
+            _bp_block = _bp.to_prompt_block()
+            if _bp_block:
+                extra_guidance += (
+                    "\n\n## BenchmarkAgent Selections (USE THESE)\n"
+                    "The following datasets, baselines, and code snippets were "
+                    "automatically selected and validated by the BenchmarkAgent. "
+                    "You MUST use these selections in your experiment code.\n\n"
+                    + _bp_block
+                )
+                logger.info(
+                    "BA: Injected benchmark plan (%d benchmarks, %d baselines)",
+                    len(_bp.selected_benchmarks), len(_bp.selected_baselines),
+                )
+        except Exception as _bp_exc:
+            logger.debug("BA: Failed to load benchmark plan: %s", _bp_exc)
 
     # --- P2.2+P2.3: LLM training topic detection and guidance ---
     _llm_keywords = (
@@ -2125,6 +2280,37 @@ def _execute_code_generation(
     )
     topic_lower = config.research.topic.lower()
     is_llm_topic = any(kw in topic_lower for kw in _llm_keywords)
+
+    # --- I-08: RL topic detection and step guidance ---
+    _rl_keywords = (
+        "reinforcement learning", "policy gradient", "ppo", "sac", "td3",
+        "ddpg", "dqn", "a2c", "a3c", "mujoco", "locomotion", "continuous control",
+        "reward shaping", "exploration", "multi-agent rl", "marl", "curriculum rl",
+        "imitation learning", "inverse rl", "offline rl", "model-based rl",
+        "actor-critic", "reinforce", "gym", "gymnasium",
+    )
+    is_rl_topic = any(kw in topic_lower for kw in _rl_keywords)
+    if is_rl_topic:
+        try:
+            extra_guidance += _pm.block("rl_step_guidance")
+        except Exception:  # noqa: BLE001
+            pass
+
+    # --- F-01: Framework API doc injection (auto-detected) ---
+    try:
+        from researchclaw.data import detect_frameworks, load_framework_docs
+        _hypothesis_text = _read_prior_artifact(run_dir, "hypotheses.md") or ""
+        _fw_ids = detect_frameworks(
+            config.research.topic, _hypothesis_text, exp_plan or ""
+        )
+        if _fw_ids:
+            _fw_docs = load_framework_docs(_fw_ids, max_chars=8000)
+            if _fw_docs:
+                extra_guidance += _fw_docs
+                logger.info("F-01: Injected framework docs for: %s", _fw_ids)
+    except Exception:  # noqa: BLE001
+        logger.debug("F-01: Framework doc injection skipped", exc_info=True)
+
     if is_llm_topic and config.experiment.mode == "docker":
         try:
             extra_guidance += _pm.block("llm_training_guidance")
@@ -2149,8 +2335,81 @@ def _execute_code_generation(
                 f"- If possible, use a smaller model (<=7B parameters)\n"
             )
 
-    # --- Initial multi-file generation ---
-    if llm is not None:
+    # --- Code generation: Advanced Code Agent or legacy single-shot ---
+    _code_agent_active = False
+    _code_max_tokens = 8192
+
+    if config.experiment.code_agent.enabled and llm is not None:
+        # ── F-02: Advanced Code Agent path ────────────────────────────────
+        from researchclaw.pipeline.code_agent import CodeAgent as _CodeAgent
+
+        _ca_cfg = config.experiment.code_agent
+        # Ensure we have a proper config object
+        if not hasattr(_ca_cfg, "enabled"):
+            from researchclaw.pipeline.code_agent import (
+                CodeAgentConfig as _CAConfig,
+            )
+            _ca_cfg = _CAConfig()
+
+        # Sandbox factory (only for sandbox/docker modes)
+        _sandbox_factory = None
+        if config.experiment.mode in ("sandbox", "docker"):
+            from researchclaw.experiment.factory import (
+                create_sandbox as _csb,
+            )
+            _sandbox_factory = _csb
+
+        if any(
+            config.llm.primary_model.startswith(p)
+            for p in ("gpt-5", "o3", "o4")
+        ):
+            _code_max_tokens = 16384
+
+        _agent = _CodeAgent(
+            llm=llm,
+            prompts=_pm,
+            config=_ca_cfg,
+            stage_dir=stage_dir,
+            sandbox_factory=_sandbox_factory,
+            experiment_config=config.experiment,
+        )
+        _agent_result = _agent.generate(
+            topic=config.research.topic,
+            exp_plan=exp_plan,
+            metric=metric,
+            pkg_hint=pkg_hint + "\n" + compute_budget + "\n" + extra_guidance,
+            max_tokens=_code_max_tokens,
+        )
+        files = _agent_result.files
+        _code_agent_active = True
+
+        # Write agent artifacts
+        (stage_dir / "code_agent_log.json").write_text(
+            json.dumps(
+                {
+                    "log": _agent_result.validation_log,
+                    "llm_calls": _agent_result.total_llm_calls,
+                    "sandbox_runs": _agent_result.total_sandbox_runs,
+                    "best_score": _agent_result.best_score,
+                    "tree_nodes_explored": _agent_result.tree_nodes_explored,
+                    "review_rounds": _agent_result.review_rounds,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        if _agent_result.architecture_spec:
+            (stage_dir / "architecture_spec.yaml").write_text(
+                _agent_result.architecture_spec, encoding="utf-8",
+            )
+        logger.info(
+            "CodeAgent: %d LLM calls, %d sandbox runs, score=%.2f",
+            _agent_result.total_llm_calls,
+            _agent_result.total_sandbox_runs,
+            _agent_result.best_score,
+        )
+    elif llm is not None:
+        # ── Legacy single-shot generation ─────────────────────────────────
         topic = config.research.topic
         sp = _pm.for_stage(
             "code_generation",
@@ -2365,7 +2624,8 @@ def _execute_code_generation(
         )
 
     # --- P1.4: LLM Code Review (Stage 10.5) ---
-    if llm is not None:
+    # Skip when CodeAgent is active — Phase 4 review already covers this.
+    if llm is not None and not _code_agent_active:
         all_code_review = "\n\n".join(
             f"# --- {fname} ---\n{code}" for fname, code in files.items()
         )
@@ -3800,12 +4060,31 @@ def _execute_result_analysis(
         "latex_table": exp_data["latex_table"],
         "generated": _utcnow_iso(),
     }
+    # R13-1: Detect zero-variance across conditions (all conditions identical primary metric)
+    if _condition_summaries and len(_condition_summaries) >= 2:
+        _primary_vals = []
+        for _cs in _condition_summaries.values():
+            if isinstance(_cs, dict):
+                _pm = _cs.get("primary_metric", {})
+                _pv = _pm.get("mean") if isinstance(_pm, dict) else _pm
+                if isinstance(_pv, (int, float)):
+                    _primary_vals.append(_pv)
+        if len(_primary_vals) >= 2 and len(set(_primary_vals)) == 1:
+            _zv_warn = (
+                f"ZERO VARIANCE: All {len(_primary_vals)} conditions have "
+                f"identical primary_metric ({_primary_vals[0]}). "
+                f"Experiment condition wiring is likely broken."
+            )
+            _ablation_warnings.append(_zv_warn)
+            logger.warning("R13-1: %s", _zv_warn)
+
     if _ablation_warnings:
         summary_payload["ablation_warnings"] = _ablation_warnings
     if _all_paired:
         summary_payload["paired_comparisons"] = _all_paired
     if _condition_summaries:
         summary_payload["condition_summaries"] = _condition_summaries
+        summary_payload["condition_metrics"] = _condition_summaries  # alias for quality gate
         summary_payload["total_conditions"] = _total_conditions
     if _total_metrics:
         summary_payload["total_metric_keys"] = _total_metrics
@@ -3911,27 +4190,81 @@ Generated: {_utcnow_iso()}
     if (stage_dir / "results_table.tex").exists():
         artifacts.append("results_table.tex")
 
-    # IMP-6: Generate charts early (Stage 14) so paper draft can reference them
-    try:
-        from researchclaw.experiment.visualize import (
-            generate_all_charts as _gen_charts_early,
-        )
+    # IMP-6 + FA: Generate charts early (Stage 14) so paper draft can reference them
+    # Try FigureAgent first (multi-agent intelligent charts), fall back to visualize.py
+    _figure_plan_saved = False
+    if config.experiment.figure_agent.enabled and llm is not None:
+        try:
+            from researchclaw.agents.figure_agent import FigureOrchestrator
+            from researchclaw.agents.figure_agent.orchestrator import FigureAgentConfig as _FACfg
 
-        _charts_dir = stage_dir / "charts"
-        _early_charts = _gen_charts_early(
-            run_dir,
-            _charts_dir,
-            metric_key=config.experiment.metric_key,
-        )
-        if _early_charts:
-            for _cp in _early_charts:
-                artifacts.append(f"charts/{_cp.name}")
-            logger.info(
-                "Stage 14: Generated %d early charts for paper embedding",
-                len(_early_charts),
+            _fa_cfg = _FACfg(
+                enabled=True,
+                min_figures=config.experiment.figure_agent.min_figures,
+                max_figures=config.experiment.figure_agent.max_figures,
+                max_iterations=config.experiment.figure_agent.max_iterations,
+                render_timeout_sec=config.experiment.figure_agent.render_timeout_sec,
+                strict_mode=config.experiment.figure_agent.strict_mode,
+                dpi=config.experiment.figure_agent.dpi,
             )
-    except Exception as _chart_exc:
-        logger.warning("Stage 14: Early chart generation failed: %s", _chart_exc)
+            _fa = FigureOrchestrator(llm, _fa_cfg, stage_dir=stage_dir)
+
+            # Build conditions list from condition_summaries
+            _fa_conditions = list(_condition_summaries.keys()) if _condition_summaries else []
+
+            _fa_plan = _fa.orchestrate({
+                "experiment_results": exp_data.get("structured_results", {}),
+                "condition_summaries": _condition_summaries,
+                "metrics_summary": exp_data.get("metrics_summary", {}),
+                "metric_key": config.experiment.metric_key,
+                "conditions": _fa_conditions,
+                "topic": _read_prior_artifact(run_dir, "topic.md") or config.research.topic,
+                "hypothesis": _read_prior_artifact(run_dir, "hypotheses.md") or "",
+                "output_dir": str(stage_dir / "charts"),
+            })
+
+            if _fa_plan.figure_count > 0:
+                # Save figure plan for Stage 17 to read
+                (stage_dir / "figure_plan.json").write_text(
+                    json.dumps(_fa_plan.to_dict(), indent=2, default=str),
+                    encoding="utf-8",
+                )
+                _figure_plan_saved = True
+                for _cf_name in _fa_plan.get_chart_files():
+                    artifacts.append(f"charts/{_cf_name}")
+                logger.info(
+                    "Stage 14: FigureAgent generated %d charts (%d passed review, %.1fs)",
+                    _fa_plan.figure_count,
+                    _fa_plan.passed_count,
+                    _fa_plan.elapsed_sec,
+                )
+            else:
+                logger.warning("Stage 14: FigureAgent produced no charts, falling back")
+        except Exception as _fa_exc:
+            logger.warning("Stage 14: FigureAgent failed (%s), falling back to visualize.py", _fa_exc)
+
+    # Fallback: legacy visualize.py chart generation
+    if not _figure_plan_saved:
+        try:
+            from researchclaw.experiment.visualize import (
+                generate_all_charts as _gen_charts_early,
+            )
+
+            _charts_dir = stage_dir / "charts"
+            _early_charts = _gen_charts_early(
+                run_dir,
+                _charts_dir,
+                metric_key=config.experiment.metric_key,
+            )
+            if _early_charts:
+                for _cp in _early_charts:
+                    artifacts.append(f"charts/{_cp.name}")
+                logger.info(
+                    "Stage 14: Generated %d early charts (legacy) for paper embedding",
+                    len(_early_charts),
+                )
+        except Exception as _chart_exc:
+            logger.warning("Stage 14: Early chart generation failed: %s", _chart_exc)
 
     return StageResult(
         stage=Stage.RESULT_ANALYSIS,
@@ -4989,32 +5322,50 @@ def _execute_paper_draft(
         "- FORBIDDEN: generating numbers that 'look right' based on your training data\n"
     )
 
-    # IMP-6: Inject chart references into paper draft prompt
-    _chart_files: list[str] = []
+    # IMP-6 + FA: Inject chart references into paper draft prompt
+    # Prefer FigureAgent's figure_plan.json (rich descriptions) over raw file scan
+    _fa_descriptions = ""
     for _s14_dir in sorted(run_dir.glob("stage-14*")):
-        _charts_path = _s14_dir / "charts"
-        if _charts_path.is_dir():
-            for _cf in sorted(_charts_path.glob("*.png")):
-                _chart_files.append(_cf.name)
-    if _chart_files:
-        _chart_block = (
-            "\n\n## AVAILABLE FIGURES (embed in the paper)\n"
-            "The following figures were generated from actual experiment data. "
-            "You MUST reference at least 1-2 of these in the Results section "
-            "using markdown image syntax: `![Caption](charts/filename.png)`\n\n"
-        )
-        for _cf_name in _chart_files:
-            _label = _cf_name.replace("_", " ").replace(".png", "").title()
-            _chart_block += f"- `charts/{_cf_name}` — {_label}\n"
-        _chart_block += (
-            "\nFor each figure referenced, write a descriptive caption and "
-            "discuss what the figure shows in 2-3 sentences.\n"
-        )
-        exp_metrics_instruction += _chart_block
-        logger.info(
-            "Stage 17: Injected %d chart references into paper draft prompt",
-            len(_chart_files),
-        )
+        _fp_path = _s14_dir / "figure_plan.json"
+        if _fp_path.exists():
+            try:
+                _fp_data = json.loads(_fp_path.read_text(encoding="utf-8"))
+                _fa_descriptions = _fp_data.get("figure_descriptions", "")
+            except (json.JSONDecodeError, OSError):
+                pass
+            if _fa_descriptions:
+                break
+
+    if _fa_descriptions:
+        exp_metrics_instruction += "\n\n" + _fa_descriptions
+        logger.info("Stage 17: Injected FigureAgent figure descriptions into paper draft prompt")
+    else:
+        # Fallback: scan for chart files
+        _chart_files: list[str] = []
+        for _s14_dir in sorted(run_dir.glob("stage-14*")):
+            _charts_path = _s14_dir / "charts"
+            if _charts_path.is_dir():
+                for _cf in sorted(_charts_path.glob("*.png")):
+                    _chart_files.append(_cf.name)
+        if _chart_files:
+            _chart_block = (
+                "\n\n## AVAILABLE FIGURES (embed in the paper)\n"
+                "The following figures were generated from actual experiment data. "
+                "You MUST reference at least 1-2 of these in the Results section "
+                "using markdown image syntax: `![Caption](charts/filename.png)`\n\n"
+            )
+            for _cf_name in _chart_files:
+                _label = _cf_name.replace("_", " ").replace(".png", "").title()
+                _chart_block += f"- `charts/{_cf_name}` — {_label}\n"
+            _chart_block += (
+                "\nFor each figure referenced, write a descriptive caption and "
+                "discuss what the figure shows in 2-3 sentences.\n"
+            )
+            exp_metrics_instruction += _chart_block
+            logger.info(
+                "Stage 17: Injected %d chart references into paper draft prompt",
+                len(_chart_files),
+            )
 
     # P5: Extract hyperparameters from results.json for paper Method section
     _hp_table = ""

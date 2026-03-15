@@ -160,12 +160,66 @@ class DockerSandboxConfig:
     gpu_enabled: bool = True
     gpu_device_ids: tuple[int, ...] = ()
     memory_limit_mb: int = 8192
-    network_policy: str = "none"  # none | pip_only | full
+    network_policy: str = "setup_only"  # none | setup_only | pip_only | full
     pip_pre_install: tuple[str, ...] = ()
     auto_install_deps: bool = True
     shm_size_mb: int = 2048
     container_python: str = "/usr/bin/python3"
     keep_containers: bool = False
+
+
+@dataclass(frozen=True)
+class CodeAgentConfig:
+    """Configuration for the advanced multi-phase code generation agent."""
+
+    enabled: bool = True
+    # Phase 1: Architecture planning before code generation
+    architecture_planning: bool = True
+    # Phase 2: Execution-in-the-loop (run → parse error → fix)
+    exec_fix_max_iterations: int = 3
+    exec_fix_timeout_sec: int = 60
+    # Phase 3: Solution tree search (off by default — higher cost)
+    tree_search_enabled: bool = False
+    tree_search_candidates: int = 3
+    tree_search_max_depth: int = 2
+    tree_search_eval_timeout_sec: int = 120
+    # Phase 4: Multi-agent review dialog
+    review_max_rounds: int = 2
+
+
+@dataclass(frozen=True)
+class BenchmarkAgentConfig:
+    """Configuration for the BenchmarkAgent multi-agent system."""
+
+    enabled: bool = True
+    # Surveyor
+    enable_hf_search: bool = True
+    max_hf_results: int = 10
+    # Selector
+    tier_limit: int = 2
+    min_benchmarks: int = 1
+    min_baselines: int = 2
+    prefer_cached: bool = True
+    # Orchestrator
+    max_iterations: int = 2
+
+
+@dataclass(frozen=True)
+class FigureAgentConfig:
+    """Configuration for the FigureAgent multi-agent system."""
+
+    enabled: bool = True
+    # Planner
+    min_figures: int = 3
+    max_figures: int = 8
+    # Orchestrator
+    max_iterations: int = 3  # max CodeGen→Renderer→Critic retry loops
+    # Renderer
+    render_timeout_sec: int = 30
+    # Critic
+    strict_mode: bool = False
+    # Output
+    dpi: int = 300
 
 
 @dataclass(frozen=True)
@@ -179,6 +233,9 @@ class ExperimentConfig:
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     docker: DockerSandboxConfig = field(default_factory=DockerSandboxConfig)
     ssh_remote: SshRemoteConfig = field(default_factory=SshRemoteConfig)
+    code_agent: CodeAgentConfig = field(default_factory=CodeAgentConfig)
+    benchmark_agent: BenchmarkAgentConfig = field(default_factory=BenchmarkAgentConfig)
+    figure_agent: FigureAgentConfig = field(default_factory=FigureAgentConfig)
 
 
 @dataclass(frozen=True)
@@ -435,6 +492,58 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
                 "remote_workdir", "/tmp/researchclaw_experiments"
             ),
         ),
+        code_agent=_parse_code_agent_config(data.get("code_agent") or {}),
+        benchmark_agent=_parse_benchmark_agent_config(
+            data.get("benchmark_agent") or {}
+        ),
+        figure_agent=_parse_figure_agent_config(data.get("figure_agent") or {}),
+    )
+
+
+def _parse_benchmark_agent_config(data: dict[str, Any]) -> BenchmarkAgentConfig:
+    if not data:
+        return BenchmarkAgentConfig()
+    return BenchmarkAgentConfig(
+        enabled=bool(data.get("enabled", True)),
+        enable_hf_search=bool(data.get("enable_hf_search", True)),
+        max_hf_results=int(data.get("max_hf_results", 10)),
+        tier_limit=int(data.get("tier_limit", 2)),
+        min_benchmarks=int(data.get("min_benchmarks", 1)),
+        min_baselines=int(data.get("min_baselines", 2)),
+        prefer_cached=bool(data.get("prefer_cached", True)),
+        max_iterations=int(data.get("max_iterations", 2)),
+    )
+
+
+def _parse_figure_agent_config(data: dict[str, Any]) -> FigureAgentConfig:
+    if not data:
+        return FigureAgentConfig()
+    return FigureAgentConfig(
+        enabled=bool(data.get("enabled", True)),
+        min_figures=int(data.get("min_figures", 3)),
+        max_figures=int(data.get("max_figures", 8)),
+        max_iterations=int(data.get("max_iterations", 3)),
+        render_timeout_sec=int(data.get("render_timeout_sec", 30)),
+        strict_mode=bool(data.get("strict_mode", False)),
+        dpi=int(data.get("dpi", 300)),
+    )
+
+
+def _parse_code_agent_config(data: dict[str, Any]) -> CodeAgentConfig:
+    if not data:
+        return CodeAgentConfig()
+    return CodeAgentConfig(
+        enabled=bool(data.get("enabled", True)),
+        architecture_planning=bool(data.get("architecture_planning", True)),
+        exec_fix_max_iterations=int(data.get("exec_fix_max_iterations", 3)),
+        exec_fix_timeout_sec=int(data.get("exec_fix_timeout_sec", 60)),
+        tree_search_enabled=bool(data.get("tree_search_enabled", False)),
+        tree_search_candidates=int(data.get("tree_search_candidates", 3)),
+        tree_search_max_depth=int(data.get("tree_search_max_depth", 2)),
+        tree_search_eval_timeout_sec=int(
+            data.get("tree_search_eval_timeout_sec", 120)
+        ),
+        review_max_rounds=int(data.get("review_max_rounds", 2)),
     )
 
 
