@@ -124,6 +124,11 @@ def _execute_code_generation(
             if config.experiment.mode == "docker"
             else "none"  # sandbox mode has no network
         )
+        # Check if sandbox mode explicitly enables network access
+        _sandbox_network = getattr(getattr(config, "experiment", None), "sandbox", None)
+        _sandbox_network_ok = getattr(_sandbox_network, "network", False) if _sandbox_network else False
+        if _sandbox_network_ok:
+            _net_policy = "full"  # sandbox with network: true → treat as full network
         if _net_policy == "none":
             # Network disabled: inject strict offline-only guidance
             try:
