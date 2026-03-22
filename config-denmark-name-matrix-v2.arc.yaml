@@ -1,0 +1,98 @@
+project:
+  name: "denmark-name-surname-matrix"
+  mode: "full-auto"
+
+research:
+  topic: "Danish Name-Outcome Analysis: Patronymic vs. Toponymic Surname Effects on Earnings. Using Denmark Statistikbanken (dst.dk) free API, analyze whether individuals with patronymic surnames (-sen: Jensen, Nielsen, Hansen) show different earnings outcomes than those with toponymic/estate surnames (-gaard, -borg, -lund). Focus: (1) Classify top 100 Danish surnames as patronymic vs toponymic using suffix rules. (2) Pull mean income by surname type from Statistikbanken INDKP105 table (income by age/education). (3) Test whether surname type (patronymic vs toponymic) predicts earnings after controlling for age and parental education. (4) Calculate which given names are disproportionately chosen by university-educated parents in 2015-2025 using NAVNE table. Simple OLS regression: earnings ~ surname_type + age + parental_education. Report effect size and confidence intervals. Data: Statistikbanken free JSON API at api.statbank.dk/v1. No API key required."
+  domains:
+    - "sociology"
+    - "demography"
+    - "quantitative-methods"
+    - "scandinavian-studies"
+    - "causal-inference"
+  daily_paper_count: 15
+  quality_threshold: 4.0
+
+runtime:
+  timezone: "America/New_York"
+  max_parallel_tasks: 2
+  approval_timeout_hours: 24
+  retry_limit: 3
+
+notifications:
+  channel: "console"
+  target: ""
+  on_stage_start: true
+  on_stage_fail: true
+  on_gate_required: true
+
+knowledge_base:
+  backend: "markdown"
+  root: "docs/kb"
+
+openclaw_bridge:
+  use_cron: false
+  use_message: false
+  use_memory: false
+  use_sessions_spawn: false
+  use_web_fetch: false
+  use_browser: false
+
+llm:
+  provider: "anthropic"
+  base_url: "https://api.anthropic.com"
+  api_key_env: "ANTHROPIC_OAUTHTOKEN"
+  primary_model: "claude-sonnet-4-6"
+  fallback_models:
+    - "claude-sonnet-4-6"
+    - "x-ai/grok-4.1-fast"
+    - "qwen/qwen3.5-9b"
+    - "openai/gpt-4.1-nano"
+    - "xiaomi/mimo-v2-pro"
+
+  fallback_url: "https://openrouter.ai/api/v1"
+  fallback_api_key_env: "OPENROUTER_API_KEY"
+  fallback_openrouter_models: []
+  temperature: 0.3
+  max_tokens: 16000
+  timeout: 120
+  rate_limit:
+    rpm: 5
+    tpm: 20000
+
+experiment:
+  mode: "sandbox"
+  sandbox:
+    python_path: ".venv/bin/python"
+    timeout: 300
+    memory_limit: "4G"
+    network: true
+  hardware:
+    gpu: false
+
+output:
+  format: "latex"
+  template: "neurips"
+  artifacts_dir: "artifacts"
+  keep_intermediates: true
+
+literature:
+  providers:
+    - "openalex"
+    - "semantic_scholar"
+    - "arxiv"
+  max_papers: 50
+  min_relevance: 0.6
+  verification:
+    enabled: true
+    check_doi: true
+    check_arxiv: true
+
+figures:
+  enabled: true
+  backend: "matplotlib"
+  style: "academic"
+  dpi: 300
+
+prompts:
+  custom_file: ""

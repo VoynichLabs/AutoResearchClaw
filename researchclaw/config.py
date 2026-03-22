@@ -171,6 +171,10 @@ class LlmConfig:
     api_key: str = ""
     primary_model: str = ""
     fallback_models: tuple[str, ...] = ()
+    # Cross-provider (OpenRouter) fallback
+    fallback_url: str = ""
+    fallback_api_key_env: str = ""
+    fallback_openrouter_models: tuple[str, ...] = ()
     s2_api_key: str = ""
     notes: str = ""
     acp: AcpConfig = field(default_factory=AcpConfig)
@@ -187,6 +191,7 @@ class SecurityConfig:
 class SandboxConfig:
     python_path: str = DEFAULT_PYTHON_PATH
     gpu_required: bool = False
+    network: bool = False  # Allow network calls in sandbox (e.g. public API data)
     allowed_imports: tuple[str, ...] = (
         "math",
         "random",
@@ -651,6 +656,9 @@ def _parse_llm_config(data: dict[str, Any]) -> LlmConfig:
         api_key=data.get("api_key", ""),
         primary_model=data.get("primary_model", ""),
         fallback_models=tuple(data.get("fallback_models") or ()),
+        fallback_url=data.get("fallback_url", ""),
+        fallback_api_key_env=data.get("fallback_api_key_env", ""),
+        fallback_openrouter_models=tuple(data.get("fallback_openrouter_models") or ()),
         s2_api_key=data.get("s2_api_key", ""),
         notes=data.get("notes", ""),
         acp=AcpConfig(
@@ -679,6 +687,7 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
         sandbox=SandboxConfig(
             python_path=sandbox_data.get("python_path", DEFAULT_PYTHON_PATH),
             gpu_required=bool(sandbox_data.get("gpu_required", False)),
+            network=bool(sandbox_data.get("network", False)),
             allowed_imports=tuple(
                 sandbox_data.get("allowed_imports", SandboxConfig.allowed_imports)
             ),

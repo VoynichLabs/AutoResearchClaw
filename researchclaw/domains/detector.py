@@ -236,6 +236,17 @@ _KEYWORD_RULES: list[tuple[list[str], str]] = [
       "backpropagation", "gradient descent", "pytorch", "tensorflow",
       "torch", "sklearn"], "ml_generic"),
 
+    # Social science / registry / demography / political science
+    # NOTE: Must come before physics to avoid "simulation" false-positive match
+    (["statistikbanken", "statbank", "dst.dk", "destatis",
+      "bundeswahlleiter", "navnestatistik",
+      "population register", "administrative data", "registry-based",
+      "registry data", "public registry", "open data api",
+      "name frequency", "name cohort", "birth cohort", "birth year",
+      "socioeconomic outcomes", "voting pattern", "vote share",
+      "electoral", "demography", "demographic"],
+     "economics_empirical"),
+
     # Physics
     (["molecular dynamics", "n-body", "lennard-jones", "force field",
       "jax-md", "ase", "openmm"], "physics_simulation"),
@@ -270,6 +281,8 @@ _KEYWORD_RULES: list[tuple[list[str], str]] = [
      "economics_empirical"),
     (["economics", "economic", "market", "equilibrium",
       "utility", "welfare"], "economics_general"),
+
+
 
     # Mathematics
     (["numerical method", "numerical analysis", "convergence order",

@@ -1,0 +1,95 @@
+project:
+  name: "denmark-military-migration-integration"
+  mode: "full-auto"
+
+research:
+  topic: "Military Service as Integration Accelerator: Second-Generation Immigrant Outcomes in the Danish Conscription System. Denmark uses a partial conscription lottery system — men register at 18, approximately 25% are selected to serve. This lottery creates a near-clean natural experiment. Using Statistikbanken (dst.dk) public registry data, investigate whether military service has differential integration effects for second-generation immigrants vs ethnic Danes. Core questions: (1) Are second-generation immigrant men (born in Denmark to immigrant parents, Turkish/Pakistani/Lebanese/Somali cohorts 1980-2000) more or less likely to be selected vs the baseline lottery rate? Is there selection bias in who serves? (2) Among those who serve, do second-gen immigrants show larger earnings gains, employment gains, or geographic mobility gains than ethnic Danish conscripts over a 10-year post-service window? (3) Does military service correlate with legal name adoption (heritage name → Danish name) at higher rates among second-gen conscripts than non-conscripts? (4) Is military service associated with accelerated social network integration — measured via marriage patterns, residential clustering, or occupational sector convergence? Methodology: use Statistikbanken's public data on military service participation by birth year and demographic background, crossed with employment/income/education outcomes. If the lottery is truly random within eligibility cohorts, OLS with lottery-year fixed effects approximates IV. This tests whether Danish military institutions function as integration engines or whether integration effects are driven purely by selection into service. Policy relevance: if conscription causally accelerates integration for second-gen immigrants, this has direct implications for Denmark's ongoing immigration and integration policy debates."
+  domains:
+    - "economics"
+    - "political-science"
+    - "migration-studies"
+    - "military-sociology"
+    - "causal-inference"
+  daily_paper_count: 15
+  quality_threshold: 4.0
+
+runtime:
+  timezone: "America/New_York"
+  max_parallel_tasks: 2
+  approval_timeout_hours: 24
+  retry_limit: 3
+
+notifications:
+  channel: "console"
+  on_stage_start: true
+  on_stage_fail: true
+  on_gate_required: true
+
+knowledge_base:
+  backend: "markdown"
+  root: "docs/kb"
+
+openclaw_bridge:
+  use_cron: false
+  use_message: false
+  use_memory: false
+  use_sessions_spawn: false
+  use_web_fetch: false
+  use_browser: false
+
+llm:
+  provider: "anthropic"
+  base_url: "https://api.anthropic.com"
+  api_key_env: "ANTHROPIC_OAUTHTOKEN"
+  primary_model: "claude-sonnet-4-6"
+  fallback_models:
+    - "claude-haiku-4-5"
+    - "qwen/qwen3.5-9b"
+    - "openai/gpt-4.1-nano"
+
+  fallback_url: "https://openrouter.ai/api/v1"
+  fallback_api_key_env: "OPENROUTER_API_KEY"
+  fallback_openrouter_models: []
+  temperature: 0.3
+  max_tokens: 16000
+  timeout: 120
+  rate_limit:
+    rpm: 20
+    tpm: 80000
+
+experiment:
+  mode: "sandbox"
+  sandbox:
+    python_path: ".venv/bin/python"
+    timeout: 300
+    memory_limit: "4G"
+    network: true
+  hardware:
+    gpu: false
+
+output:
+  format: "latex"
+  template: "neurips"
+  artifacts_dir: "artifacts"
+  keep_intermediates: true
+
+literature:
+  providers:
+    - "openalex"
+    - "semantic_scholar"
+    - "arxiv"
+  max_papers: 50
+  min_relevance: 0.6
+  verification:
+    enabled: true
+    check_doi: true
+    check_arxiv: true
+
+figures:
+  enabled: true
+  backend: "matplotlib"
+  style: "academic"
+  dpi: 300
+
+prompts:
+  custom_file: ""
