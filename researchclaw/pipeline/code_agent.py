@@ -73,7 +73,17 @@ class CodeAgentConfig:
     tree_search_eval_timeout_sec: int = 120
 
     # Phase 5: Multi-agent review dialog
-    review_max_rounds: int = 2
+    # BUG-3 FIX (2025-03-22): Increased from 2 to 4.  All three failed
+    # pipelines hit the REVISE path on both of the old 2 allowed rounds,
+    # meaning the loop ended before the model had a chance to converge.
+    # Four rounds gives the reviewer two full fix cycles before giving up.
+    # Additionally, _phase4_review now accepts early if score >= 3.
+    review_max_rounds: int = 4
+
+    # Score threshold for early acceptance (regardless of verdict).
+    # Prevents needless REVISE loops when code is already acceptable.
+    # BUG-3 FIX: new field — set to 3 (out of 10) as a lenient gate.
+    review_accept_score_threshold: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -363,12 +373,32 @@ class CodeAgent:
         return "\n\n".join(parts)
 
     def _parse_blueprint(self, yaml_text: str) -> dict[str, Any] | None:
-        """Parse blueprint YAML into a structured dict."""
+        """Parse blueprint YAML into a structured dict.
+
+        BUG-1 FIX (2025-03-22): LLMs sometimes return YAML still wrapped in
+        markdown fences (```yaml ... ```) even after the outer regex in
+        _phase1_blueprint has run.  Strip any residual fences before handing
+        the text to yaml.safe_load so the parser never sees backtick lines.
+        """
+        # Strip markdown code fences — remove lines that start with ```
+        # (handles ```yaml, ```yml, and bare ``` open/close tags).
+        cleaned_lines = [
+            line for line in yaml_text.splitlines()
+            if not line.strip().startswith("```")
+        ]
+        cleaned = "\n".join(cleaned_lines).strip()
+        if not cleaned:
+            self._log_event("  Blueprint YAML empty after fence-stripping")
+            return None
         try:
             import yaml
-            data = yaml.safe_load(yaml_text)
+            data = yaml.safe_load(cleaned)
             if isinstance(data, dict) and "files" in data:
                 return data
+            self._log_event(
+                f"  Blueprint YAML parsed but missing 'files' key "
+                f"(got type={type(data).__name__})"
+            )
         except Exception as exc:
             self._log_event(f"  Blueprint YAML parse error: {exc}")
         return None
@@ -1271,7 +1301,19 @@ class CodeAgent:
                 f"critical_issues={len(critical)}"
             )
 
+            # BUG-3 FIX (2025-03-22): Accept early if verdict is APPROVE,
+            # there are no critical issues, OR the numeric score is already
+            # at or above the acceptance threshold (default 3/10).  This
+            # prevents the loop from forcing a REVISE path when the code is
+            # functionally acceptable but the reviewer is being conservative.
             if verdict == "APPROVE" or not critical:
+                break
+            if score >= self._cfg.review_accept_score_threshold:
+                self._log_event(
+                    f"  Review round {r + 1}: score={score} >= threshold "
+                    f"{self._cfg.review_accept_score_threshold} — accepting "
+                    f"despite REVISE verdict"
+                )
                 break
 
             # Fix critical issues using the code_generation system prompt

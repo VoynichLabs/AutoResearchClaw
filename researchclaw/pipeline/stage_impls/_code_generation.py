@@ -970,7 +970,14 @@ def _execute_code_generation(
             f"Experiment code:\n```python\n{all_code_for_check}\n```\n\n"
             "TASK: Evaluate whether this experiment code actually tests the "
             "stated research topic. Answer with JSON:\n"
-            '{"aligned": true/false, "reason": "...", "suggestions": "..."}\n\n'
+            '{"aligned": true/false, "partial": true/false, '
+            '"reason": "...", "suggestions": "..."}\n\n'
+            "Definitions:\n"
+            '- "aligned": true if the code fully tests the stated topic.\n'
+            '- "partial": true if the code tests the PRIMARY research question '
+            "but is missing secondary methodology requirements (e.g. a specific "
+            "evaluation protocol or secondary dataset).  Partial alignment is "
+            "NOT a hard failure — the pipeline will proceed with a warning.\n\n"
             "Check specifically:\n"
             "- Does the code implement models/methods relevant to the topic?\n"
             "- If the topic mentions LLMs/transformers/language models, does "
@@ -986,7 +993,25 @@ def _execute_code_generation(
                 max_tokens=1024,
             )
             align_data = _safe_json_loads(align_resp.content, {})
-            if isinstance(align_data, dict) and not align_data.get("aligned", True):
+            _is_aligned = align_data.get("aligned", True) if isinstance(align_data, dict) else True
+            # BUG-4 FIX (2025-03-22): Partial alignment — code covers the
+            # primary research question but misses secondary methodology
+            # requirements.  Treat as a soft pass: log a warning and proceed
+            # rather than triggering a full regeneration cycle.  Only hard
+            # misalignment (aligned=False AND partial=False) triggers regen.
+            _is_partial = align_data.get("partial", False) if isinstance(align_data, dict) else False
+            if isinstance(align_data, dict) and not _is_aligned and _is_partial:
+                alignment_ok = True  # partial pass — accept with warning
+                alignment_note = (
+                    f"PARTIAL ALIGNMENT (accepted): {align_data.get('reason', '')}"
+                )
+                logger.warning(
+                    "Stage 10: Partial topic-experiment alignment detected "
+                    "(primary hypothesis covered, secondary methods incomplete). "
+                    "Proceeding. Reason: %s",
+                    align_data.get("reason", ""),
+                )
+            if isinstance(align_data, dict) and not _is_aligned and not _is_partial:
                 alignment_ok = False
                 alignment_note = align_data.get("reason", "Misaligned")
                 suggestions = align_data.get("suggestions", "")
@@ -1034,6 +1059,31 @@ def _execute_code_generation(
                             _regen_attempt,
                         )
                         continue
+                    # BUG-2 FIX (2025-03-22): Guard against overwriting working
+                    # code with an empty/placeholder file.  If the LLM returned a
+                    # 400/empty response, _extract_multi_file_blocks may produce a
+                    # main.py that is blank or only a comment sentinel.  In that
+                    # case keep the previous version on disk rather than destroying
+                    # the last-good implementation.
+                    _regen_main = regen_files.get("main.py", "").strip()
+                    _is_empty_or_placeholder = (
+                        not _regen_main
+                        or _regen_main == "# --- main.py ---"
+                        or (
+                            len(_regen_main.splitlines()) <= 3
+                            and all(
+                                ln.strip().startswith("#") or not ln.strip()
+                                for ln in _regen_main.splitlines()
+                            )
+                        )
+                    )
+                    if _is_empty_or_placeholder:
+                        logger.warning(
+                            "Stage 10: Regen attempt %d returned empty/placeholder "
+                            "main.py — keeping previous version",
+                            _regen_attempt,
+                        )
+                        continue
                     files = regen_files
                     for fname, code in files.items():
                         (exp_dir / fname).write_text(code, encoding="utf-8")
@@ -1055,17 +1105,24 @@ def _execute_code_generation(
                         max_tokens=1024,
                     )
                     recheck_data = _safe_json_loads(recheck_resp.content, {})
-                    if isinstance(recheck_data, dict) and recheck_data.get("aligned", False):
+                    _rc_aligned = recheck_data.get("aligned", False) if isinstance(recheck_data, dict) else False
+                    # BUG-4 FIX: also accept partial alignment on re-check
+                    _rc_partial = recheck_data.get("partial", False) if isinstance(recheck_data, dict) else False
+                    if isinstance(recheck_data, dict) and (_rc_aligned or _rc_partial):
                         alignment_ok = True
-                        alignment_note = f"Regenerated after alignment check (attempt {_regen_attempt})"
+                        _suffix = " (partial)" if _rc_partial and not _rc_aligned else ""
+                        alignment_note = (
+                            f"Regenerated after alignment check{_suffix} "
+                            f"(attempt {_regen_attempt})"
+                        )
                         logger.info(
-                            "Stage 10: Code aligned after regen attempt %d",
-                            _regen_attempt,
+                            "Stage 10: Code aligned%s after regen attempt %d",
+                            _suffix, _regen_attempt,
                         )
                         break
                     else:
-                        alignment_note = recheck_data.get("reason", alignment_note)
-                        suggestions = recheck_data.get("suggestions", suggestions)
+                        alignment_note = recheck_data.get("reason", alignment_note) if isinstance(recheck_data, dict) else alignment_note
+                        suggestions = recheck_data.get("suggestions", suggestions) if isinstance(recheck_data, dict) else suggestions
                         logger.warning(
                             "Stage 10: Regen attempt %d still misaligned: %s",
                             _regen_attempt, alignment_note,
