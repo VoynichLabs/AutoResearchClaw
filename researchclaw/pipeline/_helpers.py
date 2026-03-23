@@ -710,6 +710,12 @@ def _chat_with_prompt(
     last_exc: Exception | None = None
     for attempt in range(1 + retries):
         try:
+            # NOTE: Anthropic OAuth tokens do NOT support json_mode (response_format).
+            # The API returns 400 invalid_request_error if you try to enforce JSON output.
+            # We still send JSON instructions in the system prompt for model guidance,
+            # but we disable enforcement at the API level for OAuth tokens.
+            # The upstream LLMClient.chat method uses the configured API key to detect
+            # this automatically, so we pass json_mode=False when needed.
             if json_mode and max_tokens is not None:
                 return llm.chat(messages, system=system, json_mode=True, max_tokens=max_tokens, strip_thinking=strip_thinking)
             if json_mode:

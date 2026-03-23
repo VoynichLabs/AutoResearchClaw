@@ -410,7 +410,12 @@ class LLMClient:
 
         # Use Anthropic adapter if configured
         if self._anthropic:
-            data = self._anthropic.chat_completion(model, messages, max_tokens, temperature, json_mode)
+            # NOTE: Anthropic OAuth tokens (sk-ant-oat*) do NOT support json_mode.
+            # The API returns 400 invalid_request_error when response_format is requested
+            # with an OAuth bearer token. Disable json_mode for OAuth tokens.
+            # The system prompt still contains JSON instructions for guidance.
+            _use_json_mode = json_mode and not self.config.api_key.startswith("sk-ant-oat")
+            data = self._anthropic.chat_completion(model, messages, max_tokens, temperature, _use_json_mode)
         else:
             # Original OpenAI logic
             # Copy messages to avoid mutating the caller's list (important for
