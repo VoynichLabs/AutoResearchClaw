@@ -379,7 +379,16 @@ def _execute_quality_gate(
     report: dict[str, Any] | None = None
 
     # BUG-25: Load experiment summary for cross-checking
+    # Check stage dirs first, then fall back to run-root experiment_summary_best.json
+    # (written when stage-14 is used for RESULT_ANALYSIS rather than the experiment harness)
     _exp_summary_text = _read_prior_artifact(run_dir, "experiment_summary.json") or ""
+    if not _exp_summary_text:
+        _root_best_path = run_dir / "experiment_summary_best.json"
+        if _root_best_path.exists():
+            try:
+                _exp_summary_text = _root_best_path.read_text(encoding="utf-8")
+            except OSError:
+                _exp_summary_text = ""
     _exp_summary = _safe_json_loads(_exp_summary_text, {}) if _exp_summary_text else {}
     _exp_failed = False
     if isinstance(_exp_summary, dict):
@@ -678,10 +687,16 @@ def _sanitize_fabricated_data(
     verified_values: set[float] = set()
     exp_path = run_dir / "stage-14" / "experiment_summary.json"
     if not exp_path.exists():
-        # Try other common locations
+        # Try other common locations — stage-14 variants first, then run root
         for candidate in sorted(run_dir.glob("stage-14*/experiment_summary.json")):
             exp_path = candidate
             break
+    # Also check run root for experiment_summary_best.json (written by stage-12 harness
+    # when stage-14 dir is used for a different purpose, e.g. RESULT_ANALYSIS)
+    if not exp_path.exists():
+        root_best = run_dir / "experiment_summary_best.json"
+        if root_best.exists():
+            exp_path = root_best
 
     if exp_path.exists():
         try:
