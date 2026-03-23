@@ -1293,7 +1293,10 @@ class CodeAgent:
                 break
 
             verdict = review.get("verdict", "APPROVE")
-            score = review.get("score", 10)
+            # Default score to 0 (not 10) when missing — a missing score should
+            # not cause early-accept. If the LLM explicitly APPROVEs, the
+            # verdict check handles it; if score is absent treat as worst-case.
+            score = review.get("score", 0)
             critical = review.get("critical_issues", [])
 
             self._log_event(

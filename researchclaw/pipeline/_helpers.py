@@ -358,6 +358,59 @@ def _load_hardware_profile(run_dir: Path) -> dict[str, Any] | None:
         return None
 
 
+def find_experiment_summary(run_dir: Path) -> Path | None:
+    """Return the best available experiment_summary.json path for a run.
+
+    Search order:
+    1. stage-14/experiment_summary.json (canonical location)
+    2. stage-14*/experiment_summary.json (versioned variants, by stage sort key)
+    3. experiment_summary_best.json at run root (written by stage-12 harness
+       when stage-14 is used for RESULT_ANALYSIS rather than the experiment runner)
+
+    This centralises the fallback logic that was previously duplicated across
+    runner.py, _review_publish.py, experiment_repair.py, and visualize.py.
+    """
+    # Check canonical path first
+    canonical = run_dir / "stage-14" / "experiment_summary.json"
+    if canonical.exists():
+        return canonical
+
+    # Check versioned stage-14 dirs (stage-14_v1, stage-14_repair_v1, etc.)
+    def _stage_sort_key(p: Path) -> tuple[str, int]:
+        name = p.name
+        if "_v" in name:
+            base, _, ver = name.rpartition("_v")
+            try:
+                return (base, -int(ver))
+            except ValueError:
+                return (name, -999)
+        return (name, 0)
+
+    for candidate in sorted(run_dir.glob("stage-14*/experiment_summary.json"),
+                            key=lambda p: _stage_sort_key(p.parent)):
+        if candidate.exists():
+            return candidate
+
+    # Fall back to run-root experiment_summary_best.json
+    root_best = run_dir / "experiment_summary_best.json"
+    if root_best.exists():
+        return root_best
+
+    return None
+
+
+def load_experiment_summary(run_dir: Path) -> dict[str, Any] | None:
+    """Load and parse experiment_summary.json using find_experiment_summary."""
+    path = find_experiment_summary(run_dir)
+    if path is None:
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Parsing utilities
 # ---------------------------------------------------------------------------

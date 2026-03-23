@@ -1011,7 +1011,7 @@ def _execute_code_generation(
                     "Proceeding. Reason: %s",
                     align_data.get("reason", ""),
                 )
-            if isinstance(align_data, dict) and not _is_aligned and not _is_partial:
+            elif isinstance(align_data, dict) and not _is_aligned and not _is_partial:
                 alignment_ok = False
                 alignment_note = align_data.get("reason", "Misaligned")
                 suggestions = align_data.get("suggestions", "")
