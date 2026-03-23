@@ -361,6 +361,16 @@ class LLMClient:
         # using fallback_api_key.  This MUST come before the Anthropic adapter
         # check below, otherwise provider="anthropic" would route OR models
         # through the Anthropic API and get auth errors.
+        # NOTE: if fallback_api_key or fallback_url is missing, a slash model
+        # would silently fall through to the Anthropic adapter and get an auth
+        # error. Raise explicitly so the fallback chain moves to the next model.
+        if "/" in model and self._anthropic:
+            if not self.config.fallback_api_key or not self.config.fallback_url:
+                raise urllib.error.HTTPError(
+                    "", 401,
+                    f"Model {model} requires OpenRouter but fallback_url/fallback_api_key not configured",
+                    {}, None,
+                )
         if "/" in model and self._anthropic and self.config.fallback_api_key and self.config.fallback_url:
             or_body = {
                 "model": model,
@@ -480,8 +490,20 @@ class LLMClient:
                         "Content-Type": "application/json",
                         "User-Agent": self.config.user_agent,
                     }
+                    # Rebuild a clean payload for the fallback — don't reuse
+                    # the primary payload which may have model-specific mutations
+                    # (Claude json hint injected into msgs, claude-specific fields, etc.)
+                    fallback_body: dict[str, Any] = {
+                        "model": model,
+                        "messages": [dict(m) for m in messages],
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                    }
+                    if json_mode:
+                        fallback_body["response_format"] = {"type": "json_object"}
+                    fallback_payload = json.dumps(fallback_body).encode("utf-8")
                     fallback_req = urllib.request.Request(
-                        fallback_url, data=payload, headers=fallback_headers
+                        fallback_url, data=fallback_payload, headers=fallback_headers
                     )
                     with urllib.request.urlopen(
                         fallback_req, timeout=self.config.timeout_sec
