@@ -68,14 +68,17 @@ class LLMConfig:
     max_tokens: int = 4096
     temperature: float = 0.7
     max_retries: int = 3
-    retry_base_delay: float = 2.0
+    retry_base_delay: float = 5.0
     timeout_sec: int = 300
     user_agent: str = _DEFAULT_USER_AGENT
     # MetaClaw bridge: extra headers for proxy requests
     extra_headers: dict[str, str] = field(default_factory=dict)
-    # MetaClaw bridge: fallback URL if primary (proxy) is unreachable
+    # MetaClaw bridge / OpenRouter cross-provider fallback
     fallback_url: str = ""
     fallback_api_key: str = ""
+    # OpenRouter model list — appended to model chain in chat()
+    # Models with "/" in their name route to fallback_url with fallback_api_key
+    fallback_openrouter_models: list[str] = field(default_factory=list)
 
 
 class LLMClient:
@@ -83,7 +86,11 @@ class LLMClient:
 
     def __init__(self, config: LLMConfig) -> None:
         self.config = config
-        self._model_chain = [config.primary_model] + list(config.fallback_models)
+        self._model_chain = (
+            [config.primary_model]
+            + list(config.fallback_models)
+            + list(config.fallback_openrouter_models)
+        )
         self._anthropic = None  # Will be set by from_rc_config if needed
 
     @classmethod
@@ -123,14 +130,30 @@ class LLMClient:
             if bridge.fallback_api_key:
                 fallback_api_key = bridge.fallback_api_key
 
+        # Resolve OpenRouter / cross-provider fallback fields from rc_config
+        llm_fallback_url = getattr(rc_config.llm, "fallback_url", "") or ""
+        llm_fallback_api_key_env = getattr(rc_config.llm, "fallback_api_key_env", "") or ""
+        llm_fallback_api_key = (
+            os.environ.get(llm_fallback_api_key_env, "") if llm_fallback_api_key_env else ""
+        )
+        llm_fallback_or_models = list(
+            getattr(rc_config.llm, "fallback_openrouter_models", None) or []
+        )
+
+        # MetaClaw bridge overrides take precedence over llm-level fallback fields
+        resolved_fallback_url = fallback_url or llm_fallback_url
+        resolved_fallback_api_key = fallback_api_key or llm_fallback_api_key
+
         config = LLMConfig(
             base_url=base_url,
             api_key=api_key,
             primary_model=rc_config.llm.primary_model or "gpt-4o",
             fallback_models=list(rc_config.llm.fallback_models or []),
-            fallback_url=fallback_url,
-            fallback_api_key=fallback_api_key,
+            fallback_url=resolved_fallback_url,
+            fallback_api_key=resolved_fallback_api_key,
+            fallback_openrouter_models=llm_fallback_or_models,
         )
+
         client = cls(config)
 
         # Detect Anthropic provider — use original URL/key (not the
@@ -276,7 +299,11 @@ class LLMClient:
 
                 # 400 is normally non-retryable, but some providers
                 # (Azure OpenAI) return 400 during overload / rate-limit.
-                # Retry if the body hints at a transient issue.
+                # Retry only if the body explicitly hints at a transient issue.
+                # NOTE: Anthropic OAuth 400 with {"message":"Error"} is NOT
+                # transient — it means the request itself is malformed (e.g.
+                # bad system prompt). Retrying never helps. Fall through to
+                # next model in the chain immediately.
                 if status == 400:
                     _transient_400 = any(
                         kw in body.lower()
@@ -328,7 +355,49 @@ class LLMClient:
         json_mode: bool,
     ) -> LLMResponse:
         """Make a single API call."""
-        
+
+        # OpenRouter routing: models with '/' (e.g. "xiaomi/mimo-v2-pro") bypass
+        # self._anthropic entirely — route directly to fallback_url (OpenRouter)
+        # using fallback_api_key.  This MUST come before the Anthropic adapter
+        # check below, otherwise provider="anthropic" would route OR models
+        # through the Anthropic API and get auth errors.
+        if "/" in model and self._anthropic and self.config.fallback_api_key and self.config.fallback_url:
+            or_body = {
+                "model": model,
+                "messages": [dict(m) for m in messages],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            if json_mode:
+                or_body["response_format"] = {"type": "json_object"}
+            or_payload = json.dumps(or_body).encode()
+            or_url = f"{self.config.fallback_url.rstrip('/')}/chat/completions"
+            or_headers = {
+                "Authorization": f"Bearer {self.config.fallback_api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": self.config.user_agent,
+                "HTTP-Referer": "https://voynichlabs.org",
+                "X-Title": "AutoResearchClaw",
+            }
+            or_req = urllib.request.Request(or_url, data=or_payload, headers=or_headers)
+            with urllib.request.urlopen(or_req, timeout=self.config.timeout_sec) as resp:
+                or_data = json.loads(resp.read())
+            if "choices" not in or_data or not or_data["choices"]:
+                raise ValueError(f"OpenRouter bad response: {or_data}")
+            choice = or_data["choices"][0]
+            usage = or_data.get("usage", {})
+            content = choice.get("message", {}).get("content") or ""
+            return LLMResponse(
+                content=content,
+                model=or_data.get("model", model),
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                total_tokens=usage.get("total_tokens", 0),
+                finish_reason=choice.get("finish_reason", ""),
+                truncated=(choice.get("finish_reason", "") == "length"),
+                raw=or_data,
+            )
+
         # Use Anthropic adapter if configured
         if self._anthropic:
             data = self._anthropic.chat_completion(model, messages, max_tokens, temperature, json_mode)
