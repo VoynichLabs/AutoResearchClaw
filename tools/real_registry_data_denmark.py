@@ -1,6 +1,10 @@
 """
 Real Danish registry data from Statistikbanken and DST APIs.
 
+REFERENCE MODULE — not imported by the ResearchClaw pipeline.
+Use this as a standalone script or reference for understanding the APIs.
+Generated experiment code should use urllib.request (stdlib), not requests.
+
 Data sources:
 1. NAME FREQUENCY (birth cohort): DST NavneBarometer API
    https://www.dst.dk/da/DstDk-Global/Udvikler/HostNavneBarometer?ajax=1
@@ -23,20 +27,31 @@ IMPORTANT LIMITATIONS:
   We provide population-level education rates by birth cohort (age group proxy).
 - Income by first name is similarly unavailable — we provide population median by birth cohort.
 
-Usage:
-    from researchclaw.data.real_registry_data_denmark import fetch_registry_data
-    df = fetch_registry_data(years=range(1985, 1996))
+Usage (standalone, outside sandbox):
+    python tools/real_registry_data_denmark.py
 
 Author: AutoResearchClaw subagent (2026-03-22)
+Moved to tools/ (2026-03-23): was incorrectly placed in researchclaw/data/
+which is a pipeline-internal package. This module uses requests+pandas
+which are NOT available in the experiment sandbox.
 """
 
 import json
-import requests
+import urllib.request
+import urllib.error
 import pandas as pd
 import numpy as np
 from typing import List, Optional, Dict
 import logging
 import time
+
+# requests is optional — used only when running standalone outside sandbox
+try:
+    import requests as _requests
+    _HAS_REQUESTS = True
+except ImportError:
+    _requests = None
+    _HAS_REQUESTS = False
 
 logger = logging.getLogger(__name__)
 
