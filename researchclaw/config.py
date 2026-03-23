@@ -177,6 +177,14 @@ class LlmConfig:
     fallback_openrouter_models: tuple[str, ...] = ()
     s2_api_key: str = ""
     notes: str = ""
+    max_retries: int = 3
+    max_tokens: int = 4096
+    temperature: float = 0.7
+    retry_base_delay: float = 5.0
+    timeout_sec: int = 300
+    user_agent: str = "AutoResearchClaw/1.0"
+    extra_headers: dict = field(default_factory=dict)
+    fallback_api_key: str = ""
     acp: AcpConfig = field(default_factory=AcpConfig)
 
 
@@ -271,7 +279,10 @@ class CodeAgentConfig:
     tree_search_max_depth: int = 2
     tree_search_eval_timeout_sec: int = 120
     # Phase 5: Multi-agent review dialog
-    review_max_rounds: int = 2
+    review_max_rounds: int = 4
+    # Score threshold for early acceptance (regardless of verdict).
+    # Prevents needless REVISE loops when code is already acceptable.
+    review_accept_score_threshold: int = 3
 
 
 @dataclass(frozen=True)
