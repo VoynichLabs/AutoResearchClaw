@@ -86,10 +86,11 @@ class AnthropicAdapter:
 
         # Prepend JSON instruction when json_mode is requested
         if json_mode:
+            json_instruction = _JSON_MODE_INSTRUCTION
             system_msg = (
-                f"{_JSON_MODE_INSTRUCTION}\n\n{system_msg}"
+                f"{json_instruction}\n\n{system_msg}"
                 if system_msg
-                else _JSON_MODE_INSTRUCTION
+                else json_instruction
             )
 
         # Build Anthropic request
@@ -103,11 +104,20 @@ class AnthropicAdapter:
             body["system"] = system_msg
 
         url = f"{self.base_url}/v1/messages"
-        headers = {
-            "x-api-key": self.api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
+        # Use Bearer auth for OAuth tokens (sk-ant-oat*), x-api-key for regular API keys
+        if self.api_key.startswith("sk-ant-oat"):
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": "oauth-2025-04-20",
+                "content-type": "application/json",
+            }
+        else:
+            headers = {
+                "x-api-key": self.api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            }
 
         try:
             if self._client is None:
