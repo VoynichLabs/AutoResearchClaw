@@ -629,6 +629,16 @@ def _execute_literature_screen(
     if not filtered_rows:
         filtered_rows = _parse_jsonl_rows(candidates_text)
     # Rebuild candidates_text from filtered rows
+    # T-PATCH: Cap at 150 candidates to avoid 200K token limit on Anthropic.
+    # Sort by keyword_overlap desc so best matches go first.
+    _MAX_CANDIDATES = 150
+    if len(filtered_rows) > _MAX_CANDIDATES:
+        filtered_rows.sort(key=lambda r: r.get("keyword_overlap", 0), reverse=True)
+        logger.info(
+            "Stage 5 token-cap: trimming %d → %d candidates before LLM screen",
+            len(filtered_rows), _MAX_CANDIDATES,
+        )
+        filtered_rows = filtered_rows[:_MAX_CANDIDATES]
     candidates_text = "\n".join(
         json.dumps(r, ensure_ascii=False) for r in filtered_rows
     )

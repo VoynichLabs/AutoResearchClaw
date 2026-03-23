@@ -496,12 +496,26 @@ def run_repair_loop(
 
 
 def _load_experiment_summary(run_dir: Path) -> dict | None:
-    """Load the most recent experiment_summary.json."""
+    """Load the most recent experiment_summary.json.
+
+    Search order (mirrors _helpers.find_experiment_summary):
+    1. stage-14/experiment_summary.json (canonical)
+    2. stage-14*/experiment_summary.json (versioned variants)
+    3. experiment_summary_best.json at run root (written by stage-12 harness
+       when stage-14 is used for RESULT_ANALYSIS instead of experiment runner)
+    """
     for candidate in sorted(run_dir.glob("stage-14*/experiment_summary.json"), reverse=True):
         try:
             return json.loads(candidate.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
+    # Fall back to run-root experiment_summary_best.json
+    root_best = run_dir / "experiment_summary_best.json"
+    if root_best.exists():
+        try:
+            return json.loads(root_best.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
     return None
 
 

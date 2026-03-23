@@ -10,7 +10,6 @@ Supports two modes:
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from researchclaw.domains.prompt_adapter import PromptAdapter, PromptBlocks

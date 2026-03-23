@@ -45,13 +45,14 @@ from typing import List, Optional, Dict
 import logging
 import time
 
-# requests is optional — used only when running standalone outside sandbox
 try:
-    import requests as _requests
-    _HAS_REQUESTS = True
-except ImportError:
-    _requests = None
-    _HAS_REQUESTS = False
+    import requests
+except ImportError as _e:
+    raise ImportError(
+        "This standalone reference script requires 'requests'. "
+        "Install it with: pip install requests\n"
+        "Generated experiment code uses urllib.request (stdlib) instead."
+    ) from _e
 
 logger = logging.getLogger(__name__)
 

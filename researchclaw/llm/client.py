@@ -371,7 +371,7 @@ class LLMClient:
                     f"Model {model} requires OpenRouter but fallback_url/fallback_api_key not configured",
                     {}, None,
                 )
-        if "/" in model and self._anthropic and self.config.fallback_api_key and self.config.fallback_url:
+            # Credentials confirmed present above — proceed with OpenRouter call.
             or_body = {
                 "model": model,
                 "messages": [dict(m) for m in messages],

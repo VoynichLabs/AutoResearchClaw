@@ -282,8 +282,6 @@ _KEYWORD_RULES: list[tuple[list[str], str]] = [
     (["economics", "economic", "market", "equilibrium",
       "utility", "welfare"], "economics_general"),
 
-
-
     # Mathematics
     (["numerical method", "numerical analysis", "convergence order",
       "finite difference", "quadrature", "interpolation",
