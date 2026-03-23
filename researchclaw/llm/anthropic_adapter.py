@@ -88,27 +88,50 @@ class AnthropicAdapter:
         # This is NOT about AutoResearchClaw pretending to be Claude Code — it is
         # a mandatory requirement of the OAuth bearer-token auth scheme used by
         # Anthropic's Claude Code subscription. Without it, the API returns 400.
-        # The prefix must be the ONLY content of the system field (or prepended to
-        # any additional system content). It must NOT be injected into user messages.
+        #
+        # CRITICAL: OAuth tokens ONLY accept the exact prefix as the system field.
+        # Any additional system content (research instructions, JSON mode, etc.)
+        # must be moved into the first user message. Appending to the system field
+        # causes 400 invalid_request_error.
         _OAUTH_REQUIRED_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
-        if self.api_key.startswith("sk-ant-oat"):
-            if system_msg:
-                # Prepend prefix only if not already present
-                if not system_msg.startswith(_OAUTH_REQUIRED_PREFIX):
-                    system_msg = f"{_OAUTH_REQUIRED_PREFIX}\n\n{system_msg}"
-            else:
-                system_msg = _OAUTH_REQUIRED_PREFIX
+        _is_oauth = self.api_key.startswith("sk-ant-oat")
 
-        # Prepend JSON instruction when json_mode is requested
-        # NOTE: for OAuth, JSON instruction goes AFTER the required prefix
-        if json_mode:
-            json_instruction = _JSON_MODE_INSTRUCTION
-            if system_msg:
-                # Append JSON instruction after existing system content
-                if json_instruction not in system_msg:
-                    system_msg = f"{system_msg}\n\n{json_instruction}"
-            else:
-                system_msg = json_instruction
+        if _is_oauth:
+            # Collect extra system content to inject into first user message
+            extra_system_parts: list[str] = []
+            if system_msg and system_msg != _OAUTH_REQUIRED_PREFIX:
+                # Strip the prefix if already present, keep only the extra
+                if system_msg.startswith(_OAUTH_REQUIRED_PREFIX):
+                    extra = system_msg[len(_OAUTH_REQUIRED_PREFIX):].strip()
+                    if extra:
+                        extra_system_parts.append(extra)
+                else:
+                    extra_system_parts.append(system_msg)
+
+            # JSON mode instruction goes into user message too for OAuth
+            if json_mode:
+                if _JSON_MODE_INSTRUCTION not in "\n".join(extra_system_parts):
+                    extra_system_parts.append(_JSON_MODE_INSTRUCTION)
+
+            # System field is ONLY the required prefix
+            system_msg = _OAUTH_REQUIRED_PREFIX
+
+            # Prepend extra system content to first user message
+            if extra_system_parts and user_messages:
+                extra_text = "\n\n".join(extra_system_parts)
+                user_messages[0] = {
+                    "role": "user",
+                    "content": f"[System Instructions]\n{extra_text}\n\n[User Message]\n{user_messages[0]['content']}",
+                }
+        else:
+            # Non-OAuth: keep system content in system field as before
+            if json_mode:
+                json_instruction = _JSON_MODE_INSTRUCTION
+                if system_msg:
+                    if json_instruction not in system_msg:
+                        system_msg = f"{system_msg}\n\n{json_instruction}"
+                else:
+                    system_msg = json_instruction
 
         # Build Anthropic request
         body: dict[str, Any] = {
@@ -119,6 +142,12 @@ class AnthropicAdapter:
         }
         if system_msg:
             body["system"] = system_msg
+
+        # NOTE: Anthropic's json_mode (response_format enforcement) does NOT work
+        # with OAuth bearer tokens. OAuth tokens fail with 400 invalid_request_error.
+        # We keep json_mode instruction in system prompt so model still outputs JSON,
+        # but we don't enforce it at the API level for OAuth tokens.
+        # For regular API keys, enforcement would be added here if Anthropic adds support.
 
         url = f"{self.base_url}/v1/messages"
         # Use Bearer auth for OAuth tokens (sk-ant-oat*), x-api-key for regular API keys
