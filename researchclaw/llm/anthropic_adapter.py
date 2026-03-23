@@ -84,14 +84,31 @@ class AnthropicAdapter:
         elif user_messages[0]["role"] != "user":
             user_messages.insert(0, {"role": "user", "content": "Continue."})
 
+        # OAuth tokens (sk-ant-oat*) require the Claude Code system prompt prefix.
+        # This is NOT about AutoResearchClaw pretending to be Claude Code — it is
+        # a mandatory requirement of the OAuth bearer-token auth scheme used by
+        # Anthropic's Claude Code subscription. Without it, the API returns 400.
+        # The prefix must be the ONLY content of the system field (or prepended to
+        # any additional system content). It must NOT be injected into user messages.
+        _OAUTH_REQUIRED_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
+        if self.api_key.startswith("sk-ant-oat"):
+            if system_msg:
+                # Prepend prefix only if not already present
+                if not system_msg.startswith(_OAUTH_REQUIRED_PREFIX):
+                    system_msg = f"{_OAUTH_REQUIRED_PREFIX}\n\n{system_msg}"
+            else:
+                system_msg = _OAUTH_REQUIRED_PREFIX
+
         # Prepend JSON instruction when json_mode is requested
+        # NOTE: for OAuth, JSON instruction goes AFTER the required prefix
         if json_mode:
             json_instruction = _JSON_MODE_INSTRUCTION
-            system_msg = (
-                f"{json_instruction}\n\n{system_msg}"
-                if system_msg
-                else json_instruction
-            )
+            if system_msg:
+                # Append JSON instruction after existing system content
+                if json_instruction not in system_msg:
+                    system_msg = f"{system_msg}\n\n{json_instruction}"
+            else:
+                system_msg = json_instruction
 
         # Build Anthropic request
         body: dict[str, Any] = {
