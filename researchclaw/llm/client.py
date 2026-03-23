@@ -414,7 +414,10 @@ class LLMClient:
             # The API returns 400 invalid_request_error when response_format is requested
             # with an OAuth bearer token. Disable json_mode for OAuth tokens.
             # The system prompt still contains JSON instructions for guidance.
-            _use_json_mode = json_mode and not self.config.api_key.startswith("sk-ant-oat")
+            _is_oauth = self.config.api_key.startswith("sk-ant-oat") if self.config.api_key else False
+            _use_json_mode = json_mode and not _is_oauth
+            if json_mode and _is_oauth:
+                logger.debug("Disabling json_mode for OAuth token (sk-ant-oat*)")
             data = self._anthropic.chat_completion(model, messages, max_tokens, temperature, _use_json_mode)
         else:
             # Original OpenAI logic
