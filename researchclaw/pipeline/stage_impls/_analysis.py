@@ -215,6 +215,20 @@ def _execute_result_analysis(
                         except (ValueError, TypeError):
                             pass
 
+    if not _condition_summaries and _best_metrics:
+        # Final fallback: treat flat metrics as a single "main" condition.
+        # Covers experiment scripts that emit top-level keys (e.g. trex_fe_r2)
+        # rather than condition/seed/metric-style keys.
+        flat_metrics = {k: v for k, v in _best_metrics.items() if "/" not in str(k)}
+        if flat_metrics:
+            _condition_summaries["main"] = {
+                "metrics": {
+                    k: float(v)
+                    for k, v in flat_metrics.items()
+                    if isinstance(v, (int, float))
+                }
+            }
+
     # R33: Build per-seed data structure (needed for CIs and paired tests below)
     _seed_data: dict[str, dict[int, float]] = {}  # {condition: {seed: value}}
     for _mk, _mv in _best_metrics.items():
