@@ -171,6 +171,22 @@ def _execute_experiment_run(
         if not effective_metrics and result.stdout:
             effective_metrics = _parse_metrics_from_stdout(result.stdout)
 
+        # R6-3: If still empty, extract flat numeric metrics from structured_results
+        # (results.json written by generated code). This bridges the gap when the
+        # generated code writes results.json correctly but stdout parsing returns nothing.
+        if not effective_metrics and structured_results and isinstance(structured_results, dict):
+            extracted = {
+                k: float(v)
+                for k, v in structured_results.items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool)
+            }
+            if extracted:
+                effective_metrics = extracted
+                logger.info(
+                    "Stage 12: populated effective_metrics from structured_results (%d keys)",
+                    len(extracted),
+                )
+
         # Determine run status: completed / partial (timed out with data) / failed
         # R6-2: Detect stdout failure signals even when exit code is 0
         _stdout_has_failure = bool(
