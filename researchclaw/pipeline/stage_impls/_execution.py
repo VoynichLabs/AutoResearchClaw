@@ -174,12 +174,17 @@ def _execute_experiment_run(
         # R6-3: If still empty, extract flat numeric metrics from structured_results
         # (results.json written by generated code). This bridges the gap when the
         # generated code writes results.json correctly but stdout parsing returns nothing.
+        # Handles two common shapes:
+        #   - flat dict: {"metric_name": 1.23, ...}
+        #   - nested:    {"metrics": {"metric_name": 1.23, ...}}
         if not effective_metrics and structured_results and isinstance(structured_results, dict):
-            extracted = {
-                k: float(v)
-                for k, v in structured_results.items()
-                if isinstance(v, (int, float)) and not isinstance(v, bool)
-            }
+            # Try nested {"metrics": {...}} first (Egon's pattern)
+            sr_metrics = structured_results.get("metrics", {})
+            if isinstance(sr_metrics, dict) and sr_metrics:
+                extracted = {k: float(v) for k, v in sr_metrics.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+            else:
+                # Fall back to flat top-level keys
+                extracted = {k: float(v) for k, v in structured_results.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
             if extracted:
                 effective_metrics = extracted
                 logger.info(
